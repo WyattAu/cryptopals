@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "crypto-primitives"
 version = "0.1.0"
-source = "git+https://github.com/WyattAu/crypto-primitives?rev=9b693cbbee0a06ae7a2588c3124f606da1d86093#9b693cbbee0a06ae7a2588c3124f606da1d86093"
+source = "git+https://github.com/WyattAu/crypto-primitives?rev=f38948a0ec69c1a8b0efbbdea0f4b7f8d1c04663#f38948a0ec69c1a8b0efbbdea0f4b7f8d1c04663"
 
 [[package]]
 name = "cryptopals"

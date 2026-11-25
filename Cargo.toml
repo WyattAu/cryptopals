@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-crypto-primitives = { git = "https://github.com/WyattAu/crypto-primitives", rev = "9b693cbbee0a06ae7a2588c3124f606da1d86093" }
+crypto-primitives = { git = "https://github.com/WyattAu/crypto-primitives", rev = "f38948a0ec69c1a8b0efbbdea0f4b7f8d1c04663" }

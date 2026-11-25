@@ -378,3 +378,91 @@ pub fn cbc_bitflip_attack(ct: &[u8], my_userdata: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+// ---- Set 3 ch17: CBC padding oracle ----
+
+pub const CH17_KEY: [u8; 16] = *b"ch17 oracle key!";
+pub const CH17_IV: [u8; 16] = *b"ch17 oracle iv!!";
+
+/// The "server": pads a user datum and CBC-encrypts it, emitting the
+/// challenge's IV||CT format — the attacker is handed the whole blob
+/// and feeds crafted variants back to the oracle.
+pub fn oracle_encrypt(pt: &[u8]) -> Vec<u8> {
+    let padded = pkcs7_pad(pt, 16);
+    let mut out = CH17_IV.to_vec();
+    out.extend(aes::cbc_encrypt(&padded, &CH17_KEY, &CH17_IV));
+    out
+}
+
+/// The "oracle": decrypts (iv, body) from the supplied blob and reveals
+/// ONLY whether the padding was valid — the classic error side channel
+/// (Vaudenay 2002).
+pub fn padding_valid(ct: &[u8]) -> bool {
+    if ct.len() < 32 || ct.len() % 16 != 0 {
+        return false;
+    }
+    let iv: [u8; 16] = ct[..16].try_into().unwrap();
+    let pt = aes::cbc_decrypt(&ct[16..], &CH17_KEY, &iv);
+    pkcs7_unpad(&pt, 16).is_some()
+}
+
+/// The padding-oracle attack. For each ciphertext block (except the
+/// first), recover the AES-decrypted bytes byte-at-a-time from the end:
+/// craft the previous block so the decrypted padding is valid for guess
+/// `g`, then dec[pos] = g ^ pad_len and pt[pos] = dec[pos] ^ prev[pos].
+///
+/// Coincidence guard: at pos 15 a wrong guess can also validate (the
+/// penultimate decrypted byte happens to be 0x02 and the guess makes a
+/// 0x02 0x02 tail). After a hit at pos 15, perturb craft[14] and
+/// re-query — a real 0x01 hit stops validating, a coincidental 0x02
+/// 0x02 does not, so the search continues.
+pub fn padding_oracle_attack(ct: &[u8]) -> Vec<u8> {
+    assert!(ct.len() >= 32 && ct.len() % 16 == 0, "oracle input must be >= 32 bytes, 16-aligned");
+    let mut plain = vec![0u8; ct.len() - 16];
+    for bi in 1..ct.len() / 16 {
+        let target: [u8; 16] = ct[bi * 16..bi * 16 + 16].try_into().unwrap();
+        let orig_prev: [u8; 16] = ct[bi * 16 - 16..bi * 16].try_into().unwrap();
+        let mut dec_known = [0u8; 16];
+        for pos in (0..16).rev() {
+            let pad_len = 16 - pos;
+            let mut found = None;
+            for g in 0..=255u8 {
+                let mut craft = orig_prev;
+                // the oracle decrypts pt_target = dec ^ craft, so to make
+                // the padding bytes read pad_len: craft[j] = dec[j] ^ pad_len
+                for j in (pos + 1)..16 {
+                    craft[j] = dec_known[j] ^ (pad_len as u8);
+                }
+                craft[pos] = g;
+                let mut probe = Vec::with_capacity(bi * 16 + 16);
+                probe.extend_from_slice(&ct[..bi * 16 - 16]);
+                probe.extend_from_slice(&craft);
+                probe.extend_from_slice(&target);
+                if padding_valid(&probe) {
+                    if pos == 15 {
+                        // coincidence guard: force the penultimate
+                        // decrypted byte away from 0x02 and re-check
+                        craft[14] ^= 0xff;
+                        let mut recheck = Vec::with_capacity(bi * 16 + 16);
+                        recheck.extend_from_slice(&ct[..bi * 16 - 16]);
+                        recheck.extend_from_slice(&craft);
+                        recheck.extend_from_slice(&target);
+                        // true 0x01 hit: last byte unchanged -> still valid.
+                        // coincidental 0x02 0x02: byte 14 perturbed -> invalid.
+                        if !padding_valid(&recheck) {
+                            continue; // coincidental — keep hunting
+                        }
+                    }
+                    found = Some(g);
+                    break;
+                }
+            }
+            let g = found.expect("padding oracle: no guess validated at this byte");
+            // decrypted[pos] = dec[pos] ^ g = pad_len -> dec[pos] = g ^ pad_len;
+            // the REAL plaintext chains on orig_prev: pt[pos] = dec[pos] ^ prev[pos]
+            dec_known[pos] = g ^ (pad_len as u8);
+            plain[(bi - 1) * 16 + pos] = dec_known[pos] ^ orig_prev[pos];
+        }
+    }
+    plain
+}

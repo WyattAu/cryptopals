@@ -235,3 +235,20 @@ fn ch14_cbc_bitflip_promotes_admin() {
     let flipped = cbc_bitflip_attack(&ct, &userdata);
     assert!(cbc_verify_admin(&flipped), "bit-flipped ct must claim admin");
 }
+
+#[test]
+fn ch17_padding_oracle_recovers_plaintext() {
+    use cryptopals::{oracle_encrypt, padding_oracle_attack, pkcs7_unpad};
+    let secrets = [
+        "000000No one has completed lab 2 so hard",
+        "Surprise! the secret is the padding oracle itself",
+        "Sweet, sweet nectar of the gods",
+        "single block secret",
+    ];
+    for secret in secrets {
+        let ct = oracle_encrypt(secret.as_bytes());
+        let recovered = padding_oracle_attack(&ct);
+        let unpadded = pkcs7_unpad(&recovered, 16).expect("recovered tail must be valid padding");
+        assert_eq!(unpadded, secret.as_bytes(), "padding oracle must recover the plaintext");
+    }
+}
