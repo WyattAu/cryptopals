@@ -277,3 +277,70 @@ fn hex_to_vec(s: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
         .collect()
 }
+
+#[test]
+fn ch19_ch20_fixed_nonce_ctr_keystream_recovered() {
+    use cryptopals::{ctr128, recover_ctr_keystream, xor_keystream};
+    let key = *b"YELLOW SUBMARINE";
+    let nonce = 0u64;
+    // deterministic 40-message corpus from a seeded word bank — rich
+    // per-column character statistics, varying lengths like the real set
+    let words = [
+        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+        "cryptanalysis", "keystream", "english", "frequency", "attack",
+        "cipher", "padding", "oracle", "column", "scoring", "recovered",
+        "plaintext", "breaking", "without", "secret", "attacker", "nonce",
+    ];
+    let mut seed = 0x12345678u64;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    let msgs: Vec<String> = (0..40)
+        .map(|i| {
+            let target = 60 + next() % 120;
+            let mut s = String::new();
+            while s.len() < target {
+                s.push_str(words[next() % words.len()]);
+                s.push(' ');
+            }
+            s
+        })
+        .collect();
+    let cts: Vec<Vec<u8>> = msgs.iter().map(|m| ctr128(&key, nonce, m.as_bytes())).collect();
+    let refs: Vec<&[u8]> = cts.iter().map(|c| c.as_slice()).collect();
+    const KLEN: usize = 64;
+    let recovered = recover_ctr_keystream(&refs, KLEN);
+    // ground truth: encrypting all-zeros yields the raw keystream
+    let truth = ctr128(&key, nonce, &[0u8; KLEN]);
+    let hits = recovered.iter().zip(&truth).filter(|(a, b)| a == b).count();
+    let missed: Vec<usize> = recovered
+        .iter()
+        .zip(&truth)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i)
+        .collect();
+    eprintln!("keystream hits {hits}/{KLEN}, missed columns: {missed:?}");
+    // column-wise frequency scoring honestly guarantees MOST columns,
+    // not all: a column dominated by one repeated char can lose to a
+    // competitor mapping that block to a higher-weighted letter — the
+    // known residual that ch19's write-up patches by hand.
+    assert!(
+        hits * 10 >= KLEN * 9,
+        "keystream recovery must nail >=90% of columns: {hits}/{KLEN} (missed {missed:?})"
+    );
+    // decrypted text must be overwhelmingly dictionary words
+    let longest = cts.iter().max_by_key(|c| c.len()).unwrap();
+    let dec = xor_keystream(longest, &recovered);
+    let text = String::from_utf8_lossy(&dec);
+    let total = text.split(' ').count();
+    let good = text
+        .split(' ')
+        .filter(|w| words.contains(w))
+        .count();
+    assert!(
+        good * 5 >= total * 3,
+        "decrypted text must be mostly dictionary words: {good}/{total} — got: {text:.60}"
+    );
+}

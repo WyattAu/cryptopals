@@ -484,3 +484,59 @@ pub fn ctr128(key: &[u8; 16], nonce: u64, data: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+// ---- Set 3 ch19+ch20: fixed-nonce CTR — keystream reuse break ----
+
+/// Column scorer for the many-time-pad attack: English letter
+/// frequency, small credit for any printable ASCII, and a hard
+/// penalty for non-printables — the decisive signal, since English
+/// decrypts to ASCII while a wrong key byte rarely does.
+fn column_best_key(column: &[u8]) -> u8 {
+    let mut best = (0u8, f64::MIN);
+    for k in 0..=255u8 {
+        let mut score = 0.0f64;
+        for &c in column {
+            let d = c ^ k;
+            score += match d {
+                b' ' => 13.0,
+                b'e' => 12.7, b't' => 9.1, b'a' => 8.2, b'o' => 7.5, b'i' => 7.0,
+                b'n' => 6.7, b's' => 6.3, b'h' => 6.1, b'r' => 6.0,
+                b'd' | b'l' | b'u' => 4.0,
+                b'c' | b'm' | b'w' | b'f' | b'g' | b'y' | b'p' | b'b' => 2.0,
+                b'v' | b'k' | b'\'' | b'j' | b'x' | b'q' | b'z' | b'.' | b',' => 0.5,
+                b'~' | b'{' | b'}' | b'|' | b'\\' | b'^' | b'`' | b'_' => -1.0,
+                0x20..=0x7e | b'\n' | b'\t' => 0.0,
+                _ => -15.0,
+            };
+        }
+        if score > best.1 {
+            best = (k, score);
+        }
+    }
+    best.0
+}
+
+/// Breaks many-time-pad CTR: all ciphertexts used the SAME key+nonce,
+/// so byte position j of every message is XORed with the same keystream
+/// byte. Column j is a single-byte-XOR problem — the ch3 frequency
+/// attack, applied per column. Returns the recovered keystream prefix.
+pub fn recover_ctr_keystream(cts: &[&[u8]], klen: usize) -> Vec<u8> {
+    let mut ks = Vec::with_capacity(klen);
+    for j in 0..klen {
+        let column: Vec<u8> = cts.iter().filter_map(|ct| ct.get(j).copied()).collect();
+        if column.is_empty() {
+            break;
+        }
+        ks.push(column_best_key(&column));
+    }
+    ks
+}
+
+/// XORs a keystream (repeating) over data — the decryption step once
+/// the keystream is recovered.
+pub fn xor_keystream(data: &[u8], ks: &[u8]) -> Vec<u8> {
+    data.iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ ks[i % ks.len()])
+        .collect()
+}
