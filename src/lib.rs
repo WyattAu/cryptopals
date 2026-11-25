@@ -369,3 +369,81 @@ pub fn run_attack() -> String {
     let profile = decrypt_profile(&spliced);
     profile.get("role").cloned().unwrap_or_default()
 }
+
+// ---- Set 2 ch14: CBC bit-flipping ----
+
+pub const CBC_KEY: [u8; 16] = *b"ch14 cbc key !!!";
+
+/// The "web app": prepend the comment wrapper and CBC-encrypt.
+pub fn cbc_prepend(userdata: &[u8]) -> Vec<u8> {
+    let prefix = b"comment1=cooking%20MCs;userdata=";
+    let suffix = b";comment2=%20like%20a%20pound%20of%20bacon";
+    let mut pt = prefix.to_vec();
+    pt.extend_from_slice(userdata);
+    pt.extend_from_slice(suffix);
+    // CBC encrypt manually: pad, chain over ecb blocks with the iv
+    let padded = crate::pkcs7_pad(&pt, 16);
+    let iv = *b"ch14 cbc iv  !!!";
+    let mut prev = iv;
+    let mut out = Vec::new();
+    for block in padded.chunks_exact(16) {
+        let mut b = [0u8; 16];
+        for k in 0..16 {
+            b[k] = block[k] ^ prev[k];
+        }
+        let enc = crate::aes::aes128_ecb_encrypt_block(&b, &CBC_KEY);
+        out.extend_from_slice(&enc);
+        prev = enc;
+    }
+    out
+}
+
+/// The "admin check": decrypt, extract the userdata segment, look for
+/// ";admin=true;".
+pub fn cbc_verify_admin(ct: &[u8]) -> bool {
+    let iv = *b"ch14 cbc iv  !!!";
+    let mut prev = iv;
+    let mut pt = Vec::new();
+    for block in ct.chunks_exact(16) {
+        let mut b = [0u8; 16];
+        b.copy_from_slice(block);
+        let dec = crate::aes::aes128_ecb_decrypt_block(&b, &CBC_KEY);
+        for k in 0..16 {
+            pt.push(dec[k] ^ prev[k]);
+        }
+        prev = b;
+    }
+    let userdata = &pt[32..]; // skip the fixed 32-byte prefix
+    std::str::from_utf8(userdata)
+        .map(|s| s.contains(";admin=true;"))
+        .unwrap_or(false)
+}
+
+/// Sanitizes userdata (the "server" strips ; and =).
+pub fn cbc_sanitize(userdata: &[u8]) -> Vec<u8> {
+    userdata
+        .iter()
+        .copied()
+        .filter(|&b| b != b';' && b != b'=')
+        .collect()
+}
+
+/// The bit-flip attack: locate the attacker-controlled block and flip
+/// the previous ciphertext block's bytes so the decrypted userdata
+/// block becomes ";admin=true;".
+pub fn cbc_bitflip_attack(ct: &[u8], my_userdata: &[u8]) -> Vec<u8> {
+    // userdata starts at byte offset 32 (two blocks of fixed prefix)
+    // attacker's FIRST controlled block = ciphertext block 2 (index 2);
+    // flipping ct block 1 (index 1) alters its decryption
+    let target = *b";admin=true;\x00\x00\x00\x00";
+    let mut out = ct.to_vec();
+    // the attacker knows their own decrypted block = the sanitized
+    // userdata they submitted (bytes 32..48 of the plaintext)
+    for i in 0..16usize {
+        // ct[16+i] contributes to the decryption of plaintext block 2
+        // at byte i: delta = old_decrypted[i] ^ target[i]
+        let old_pt = my_userdata[i % my_userdata.len()];
+        out[16 + i] = ct[16 + i] ^ (old_pt ^ target[i]);
+    }
+    out
+}

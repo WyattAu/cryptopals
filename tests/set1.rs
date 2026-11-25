@@ -224,3 +224,14 @@ fn ch13_ecb_cut_and_paste() {
     let role = run_attack();
     assert_eq!(role, "admin", "cut-and-paste must promote role to admin");
 }
+
+#[test]
+fn ch14_cbc_bitflip_promotes_admin() {
+    use cryptopals::{cbc_bitflip_attack, cbc_prepend, cbc_sanitize, cbc_verify_admin};
+    let userdata: Vec<u8> = cbc_sanitize(b"data here 16 chr");
+    assert_eq!(userdata.len(), 16); // full attacker block
+    let ct = cbc_prepend(&userdata);
+    assert!(!cbc_verify_admin(&ct), "clean ct must not claim admin");
+    let flipped = cbc_bitflip_attack(&ct, &userdata);
+    assert!(cbc_verify_admin(&flipped), "bit-flipped ct must claim admin");
+}
