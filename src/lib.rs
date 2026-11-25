@@ -656,3 +656,103 @@ pub fn break_mt_stream(ct: &[u8], known_prefix: &[u8]) -> Option<Vec<u8>> {
     }
     None
 }
+
+// ---- Set 4 ch25: random-access edit breaks CTR ----
+
+const CH25_KEY: [u8; 16] = *b"ch25 ctr key!!!!";
+
+/// The "server": stores a CTR-encrypted blob and offers a random-access
+/// edit — seeks to `offset` and overwrites with CTR-encrypted `newtext`
+/// (the same keystream). This is the edit-API leak of ch25.
+pub fn ch25_edit(ct: &[u8], offset: usize, newtext: &[u8]) -> Vec<u8> {
+    let ks = ctr128(&CH25_KEY, 0, &vec![0u8; ct.len()]);
+    let mut out = ct.to_vec();
+    for (i, &b) in newtext.iter().enumerate() {
+        if offset + i < out.len() {
+            out[offset + i] = b ^ ks[offset + i];
+        }
+    }
+    out
+}
+
+/// The break: edit(ct, 0, zeros) hands back the RAW keystream (zeros
+/// XOR keystream = keystream); XOR it over the ciphertext to recover
+/// the whole plaintext without touching the key.
+pub fn ch25_attack(ct: &[u8]) -> Vec<u8> {
+    let keystream = ch25_edit(ct, 0, &vec![0u8; ct.len()]);
+    ct.iter().zip(&keystream).map(|(a, b)| a ^ b).collect()
+}
+
+// ---- Set 4 ch26: CTR bit-flipping ----
+
+const CH26_KEY: [u8; 16] = *b"ch26 ctr key!!!!";
+
+/// The "server": wraps sanitized userdata and CTR-encrypts.
+pub fn ch26_encrypt(userdata: &[u8]) -> Vec<u8> {
+    let prefix = b"comment1=cooking%20MCs;userdata=";
+    let suffix = b";comment2=%20like%20a%20pound%20of%20bacon";
+    let clean: Vec<u8> = userdata.iter().copied().filter(|&b| b != b';' && b != b'=').collect();
+    let mut pt = prefix.to_vec();
+    pt.extend(&clean);
+    pt.extend(suffix);
+    ctr128(&CH26_KEY, 0, &pt)
+}
+
+/// The admin check on decryption.
+pub fn ch26_verify_admin(ct: &[u8]) -> bool {
+    let pt = ctr128(&CH26_KEY, 0, ct);
+    std::str::from_utf8(&pt)
+        .map(|s| s.contains(";admin=true;"))
+        .unwrap_or(false)
+}
+
+/// The attack: CTR applies the keystream linearly, so flipping
+/// ct[i] by delta flips pt[i] by the same delta — no padding oracle
+/// needed (the ch14 CBC dance, trivialized by stream-cipher malleability).
+pub fn ch26_bitflip(ct: &[u8], submitted: &[u8], target: &[u8]) -> Vec<u8> {
+    assert_eq!(submitted.len(), target.len());
+    let mut out = ct.to_vec();
+    for i in 0..target.len() {
+        out[32 + i] = ct[32 + i] ^ submitted[i] ^ target[i];
+    }
+    out
+}
+
+// ---- Set 4 ch27: CBC with IV == key leaks the key ----
+
+const CH27_KEY: [u8; 16] = *b"ch27 iv-eq-key!!";
+
+/// The broken server: CBC-encrypts with the IV equal to the key.
+pub fn ch27_encrypt(pt: &[u8]) -> Vec<u8> {
+    let padded = pkcs7_pad(pt, 16);
+    aes::cbc_encrypt(&padded, &CH27_KEY, &CH27_KEY)
+}
+
+/// The oracle: decrypts and, on invalid padding, RETURNS the decrypted
+/// buffer (a "helpful" error message).
+pub fn ch27_decrypt_or_padding_error(ct: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+    let pt = aes::cbc_decrypt(ct, &CH27_KEY, &CH27_KEY);
+    match pkcs7_unpad(&pt, 16) {
+        Some(p) => Ok(p.to_vec()),
+        None => Err(pt),
+    }
+}
+
+/// The attack: submit C1 || 0^16 || C1. The decryption is
+/// [D(C1)^KEY, D(0)^C1, D(C1)] — so KEY = P1 ^ P3, straight from the
+/// leaked error buffer.
+pub fn ch27_recover_key() -> [u8; 16] {
+    let c1 = [0x41u8; 16];
+    let mut probe = Vec::with_capacity(48);
+    probe.extend_from_slice(&c1);
+    probe.extend_from_slice(&[0u8; 16]);
+    probe.extend_from_slice(&c1);
+    let Err(pt) = ch27_decrypt_or_padding_error(&probe) else {
+        panic!("crafted probe must produce invalid padding");
+    };
+    let mut key = [0u8; 16];
+    for i in 0..16 {
+        key[i] = pt[i] ^ pt[32 + i];
+    }
+    key
+}

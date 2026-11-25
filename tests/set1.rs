@@ -396,3 +396,26 @@ fn ch24_mt_stream_bruteforced_via_known_prefix() {
     let recovered = break_mt_stream(&ct, known).expect("brute force must find the seed");
     assert_eq!(recovered, secret.to_vec(), "recovered plaintext must match");
 }
+
+#[test]
+fn ch25_and_ch26_and_ch27_set4_block() {
+    use cryptopals::{ch25_attack, ch25_edit, ch26_bitflip, ch26_encrypt, ch26_verify_admin, ch27_encrypt, ch27_recover_key, ctr128};
+    // ch25
+    let secret = b"the edit API hands the attacker the raw keystream";
+    let ct = ctr128(b"ch25 ctr key!!!!", 0, secret);
+    let rec = ch25_attack(&ct);
+    assert_eq!(rec, secret.to_vec(), "ch25: edit-oracle must recover the plaintext");
+    // ch26
+    // must contain no ';' or '=' — the sanitizer strips them and the
+    // flip alignment shifts (the ch14 lesson, again)
+    let submitted = b"?admin-trueX";
+    let ct26 = ch26_encrypt(submitted);
+    assert!(!ch26_verify_admin(&ct26), "ch26: clean ct must not claim admin");
+    let flipped = ch26_bitflip(&ct26, submitted, b";admin=true;");
+    assert!(ch26_verify_admin(&flipped), "ch26: bit-flipped ct must claim admin");
+    // ch27
+    let msg = b"IV equal to key is a design bug";
+    let _ = ch27_encrypt(msg);
+    let key = ch27_recover_key();
+    assert_eq!(&key, b"ch27 iv-eq-key!!", "ch27: leaked buffer must reveal the key");
+}
