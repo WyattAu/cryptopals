@@ -9,6 +9,8 @@ pub use crypto_primitives::base64::{base64_encode, base64_decode};
 pub use crypto_primitives::xor::xor;
 pub use crypto_primitives::padding::{pkcs7_pad, pkcs7_unpad};
 
+pub mod md4;
+
 
 
 
@@ -814,6 +816,126 @@ use std::cell::RefCell;
 thread_local! {
     /// Server-side MAC oracle the attack may query (verified against
     /// the real key inside the test).
-    pub static VERIFY_ORACLE: RefCell<Box<dyn FnMut(&[u8], &[u8; 20]) -> bool>> =
+    pub static VERIFY_ORACLE: RefCell<Box<dyn FnMut(&[u8], &[u8]) -> bool>> =
         RefCell::new(Box::new(|_, _| false));
+}
+
+// ---- Set 4 ch30: MD4 keyed MAC + length extension ----
+
+/// The naive MD4 keyed MAC (the ch30 server uses MD4, not SHA-1).
+pub fn md4_mac(key: &[u8], msg: &[u8]) -> [u8; 16] {
+    md4::md4(&[key, msg].concat())
+}
+
+/// Length extension over MD4: the 16-byte digest is the intermediate
+/// 4-word chaining state (little-endian words), and MD4's glue padding
+/// uses a LITTLE-endian length — both differ from the SHA-1 case.
+pub fn md4_length_extend(
+    mac: &[u8; 16],
+    orig_len: usize,
+    key_len_guess: usize,
+    suffix: &[u8],
+) -> ([u8; 16], Vec<u8>) {
+    let mut h = [0u32; 4];
+    for (i, w) in h.iter_mut().enumerate() {
+        *w = u32::from_le_bytes(mac[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+    let base_len = (key_len_guess + orig_len) as u64;
+    let glue = md4::Md4::glue_padding(base_len);
+    let mut ext = md4::Md4::from_state(h, base_len + glue.len() as u64);
+    ext.update(suffix);
+    (ext.finalize(), glue)
+}
+
+/// Key-length sweep against the server oracle (the ch30 variant).
+pub fn forge_admin_request_md4(
+    mac: &[u8; 16],
+    msg: &[u8],
+    suffix: &[u8],
+    max_key_len: usize,
+) -> Option<(usize, Vec<u8>, [u8; 16])> {
+    for klen in 0..=max_key_len {
+        let (forged, glue) = md4_length_extend(mac, msg.len(), klen, suffix);
+        let mut forged_msg = msg.to_vec();
+        forged_msg.extend(&glue);
+        forged_msg.extend(suffix);
+        if VERIFY_ORACLE.with(|f| (f.borrow_mut())(&forged_msg, &forged)) {
+            return Some((klen, forged_msg, forged));
+        }
+    }
+    None
+}
+
+// ---- Set 4 ch31-32: HMAC-SHA1 + (simulated) timing leaks ----
+
+/// HMAC-SHA1 per RFC 2104 (validated against RFC 2202 vectors).
+pub fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
+    let mut k = key.to_vec();
+    if k.len() > 64 {
+        k = sha1::sha1(&k).to_vec();
+    }
+    k.resize(64, 0);
+    let inner = sha1::sha1(&[k.iter().map(|&b| b ^ 0x36).collect::<Vec<_>>(), msg.to_vec()].concat());
+    sha1::sha1(&[k.iter().map(|&b| b ^ 0x5c).collect::<Vec<_>>(), inner.to_vec()].concat())
+}
+
+/// ch31's artificial timing leak, simulated: instead of sleeping per
+/// matching byte, the oracle returns the count of leading bytes that
+/// matched. Same information, deterministic test.
+pub fn leaky_compare_mac(expected: &[u8; 20], candidate: &[u8]) -> usize {
+    candidate.iter().zip(expected).take_while(|(a, b)| a == b).count()
+}
+
+/// The byte-at-a-time timing attack: maximize the reported match length
+/// per position. Stops when no guess advances the match.
+pub fn break_mac_by_timing<F>(mut oracle: F) -> Vec<u8>
+where
+    F: FnMut(&[u8]) -> usize,
+{
+    let mut recovered = Vec::new();
+    loop {
+        let mut best = (0u8, recovered.len());
+        for g in 0..=255u8 {
+            let mut cand = recovered.clone();
+            cand.push(g);
+            let m = oracle(&cand);
+            if m > best.1 {
+                best = (g, m);
+            }
+        }
+        if best.1 == recovered.len() {
+            break; // no candidate extended the match — done (or noise won)
+        }
+        recovered.push(best.0);
+    }
+    recovered
+}
+
+/// ch32's noisy leak: the oracle reports match-count minus a jitter
+/// value (0 or 1, deterministic from the candidate) — no free lunch,
+/// the attacker must SAMPLE REPEATEDLY and take the max per candidate.
+pub fn break_mac_by_noisy_timing<F>(mut oracle: F, samples: usize) -> Vec<u8>
+where
+    F: FnMut(&[u8]) -> usize,
+{
+    let mut recovered = Vec::new();
+    loop {
+        let mut best = (0u8, recovered.len());
+        for g in 0..=255u8 {
+            let mut cand = recovered.clone();
+            cand.push(g);
+            let mut m = 0usize;
+            for _ in 0..samples {
+                m = m.max(oracle(&cand));
+            }
+            if m > best.1 {
+                best = (g, m);
+            }
+        }
+        if best.1 == recovered.len() {
+            break;
+        }
+        recovered.push(best.0);
+    }
+    recovered
 }

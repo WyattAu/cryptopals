@@ -432,8 +432,8 @@ fn ch28_ch29_sha1_mac_length_extension_forgery() {
 
     // the server-side verifier: recomputes the naive MAC with the real key
     VERIFY_ORACLE.with(|f| {
-        *f.borrow_mut() = Box::new(|candidate_msg: &[u8], candidate_mac: &[u8; 20]| {
-            sha1_mac(key, candidate_msg) == *candidate_mac
+        *f.borrow_mut() = Box::new(|candidate_msg: &[u8], candidate_mac: &[u8]| {
+            sha1_mac(key, candidate_msg)[..] == *candidate_mac
         });
     });
 
@@ -458,4 +458,89 @@ fn ch28_ch29_sha1_mac_length_extension_forgery() {
     server_view.extend(suffix);
     assert_eq!(again, sha1_mac(key, &server_view), "forged MAC must equal the server's MAC");
     assert_eq!(again, forged_mac);
+}
+
+#[test]
+fn md4_vectors_from_openssl() {
+    use cryptopals::md4::{md4_hex, Md4};
+    // vectors generated with `openssl dgst -md4 -provider legacy -provider default`
+    assert_eq!(md4_hex(b""), "31d6cfe0d16ae931b73c59d7e0c089c0");
+    assert_eq!(md4_hex(b"a"), "bde52cb31de33e46245e05fbdbd6fb24");
+    assert_eq!(md4_hex(b"abc"), "a448017aaf21d8525fc10ae87aa6729d");
+    let long = b"The quick brown fox jumps over the lazy dog and then keeps on running through the park for a very long time indeed yes";
+    assert_eq!(md4_hex(long), "b22aa5f68933dfb04083f92e51bab618", "multi-block must match");
+    // incremental == one-shot
+    let mut inc = Md4::new();
+    for c in long.chunks(37) {
+        inc.update(c);
+    }
+    assert_eq!(inc.finalize(), md4::md4(long));
+}
+
+#[test]
+fn ch30_md4_mac_length_extension_forgery() {
+    use cryptopals::{forge_admin_request_md4, md4_length_extend, md4_mac, VERIFY_ORACLE};
+    let key = b"YYYYYYYYYYYYYYYY"; // 16-byte secret key
+    let msg = b"comment1=cooking%20MCs;userdata=;comment2=%20like%20a%20pound%20of%20bacon";
+    let suffix = b";admin=true";
+    let mac = md4_mac(key, msg);
+
+    VERIFY_ORACLE.with(|f| {
+        *f.borrow_mut() = Box::new(|candidate_msg: &[u8], candidate_mac: &[u8]| {
+            md4_mac(key, candidate_msg)[..] == *candidate_mac
+        });
+    });
+
+    let Some((found_klen, forged_msg, forged_mac)) = forge_admin_request_md4(&mac, msg, suffix, 64)
+    else {
+        panic!("MD4 length extension must forge a valid MAC");
+    };
+    assert_eq!(found_klen, key.len(), "accepted guess must be the true key length");
+    assert!(forged_msg.ends_with(suffix), "forged request must carry the suffix");
+    let (again, glue) = md4_length_extend(&mac, msg.len(), key.len(), suffix);
+    let mut server_view = msg.to_vec();
+    server_view.extend(&glue);
+    server_view.extend(suffix);
+    assert_eq!(again, md4_mac(key, &server_view), "forged MAC must equal the server's MAC");
+    assert_eq!(again, forged_mac);
+}
+
+#[test]
+fn ch31_hmac_rfc2202_vectors_and_timing_break() {
+    use cryptopals::{break_mac_by_timing, hmac_sha1, leaky_compare_mac};
+    // RFC 2202 test case 1
+    let tc1 = hmac_sha1(&[0x0bu8; 20], b"Hi There");
+    let tc1_hex: String = tc1.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(tc1_hex, "b617318655057264e28bc0b6fb378c8ef146be00");
+    // RFC 2202 test case 6 (key > block size, hashed first)
+    let tc6 = hmac_sha1(&[0xaau8; 80], b"Test Using Larger Than Block-Size Key - Hash Key First");
+    let tc6_hex: String = tc6.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(tc6_hex, "aa4ae5e15272d00e95705637ce8a3b55ed402112");
+
+    // the timing break: recover the MAC byte-at-a-time from the leaky oracle
+    let real_mac = hmac_sha1(b"secret server key", b"the payload to authenticate");
+    let recovered = break_mac_by_timing(|cand| leaky_compare_mac(&real_mac, cand));
+    assert_eq!(recovered, real_mac.to_vec(), "timing attack must recover the full MAC");
+}
+
+#[test]
+fn ch32_noisy_timing_break_with_repeated_sampling() {
+    use cryptopals::{break_mac_by_noisy_timing, hmac_sha1};
+    let real_mac = hmac_sha1(b"another server key", b"noisier channel");
+    // jitter 0 or 1, varying per MEASUREMENT (real timing noise varies
+    // per query, not per candidate) — deterministic LCG sequence
+    let mut tick = 0x1234_5678_9abc_def0u64;
+    let recovered = break_mac_by_noisy_timing(
+        |cand| {
+            tick = tick.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let truth = leaky_count(&real_mac, cand);
+            truth.saturating_sub((tick >> 33) as usize % 2)
+        },
+        12,
+    );
+    assert_eq!(recovered, real_mac.to_vec(), "sampled max must defeat jitter");
+}
+
+fn leaky_count(expected: &[u8; 20], candidate: &[u8]) -> usize {
+    candidate.iter().zip(expected).take_while(|(a, b)| a == b).count()
 }
