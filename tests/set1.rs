@@ -419,3 +419,43 @@ fn ch25_and_ch26_and_ch27_set4_block() {
     let key = ch27_recover_key();
     assert_eq!(&key, b"ch27 iv-eq-key!!", "ch27: leaked buffer must reveal the key");
 }
+
+#[test]
+fn ch28_ch29_sha1_mac_length_extension_forgery() {
+    use cryptopals::{forge_admin_request, sha1_length_extend, sha1_mac, VERIFY_ORACLE};
+    let key = b"XXXXXXXXXXXXXXXX"; // 16-byte secret key, unknown to the attacker
+    let msg = b"comment1=cooking%20MCs;userdata=;comment2=%20like%20a%20pound%20of%20bacon";
+    let suffix = b";admin=true";
+
+    // ch28: the honest MAC
+    let mac = sha1_mac(key, msg);
+
+    // the server-side verifier: recomputes the naive MAC with the real key
+    VERIFY_ORACLE.with(|f| {
+        *f.borrow_mut() = Box::new(|candidate_msg: &[u8], candidate_mac: &[u8; 20]| {
+            sha1_mac(key, candidate_msg) == *candidate_mac
+        });
+    });
+
+    // ch29: forge WITHOUT the key; the sweep finds the key length
+    let Some((found_klen, forged_msg, forged_mac)) =
+        forge_admin_request(&mac, msg, suffix, 64)
+    else {
+        panic!("length extension must forge a valid MAC for some key-length guess");
+    };
+    assert_eq!(found_klen, key.len(), "the accepted guess must be the true key length");
+    // the forged request is BINARY (glue padding is raw bytes) — check
+    // the suffix bytes, not UTF-8 text
+    assert!(
+        forged_msg.ends_with(suffix),
+        "the forged request must carry the admin suffix"
+    );
+    // and the forgery is independent of the oracle: the raw extension
+    // with the true key length reproduces the server's own MAC
+    let (again, glue) = sha1_length_extend(&mac, msg.len(), key.len(), suffix);
+    let mut server_view = msg.to_vec();
+    server_view.extend(&glue);
+    server_view.extend(suffix);
+    assert_eq!(again, sha1_mac(key, &server_view), "forged MAC must equal the server's MAC");
+    assert_eq!(again, forged_mac);
+}

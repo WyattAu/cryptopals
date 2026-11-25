@@ -756,3 +756,64 @@ pub fn ch27_recover_key() -> [u8; 16] {
     }
     key
 }
+
+// ---- Set 4 ch28-29: SHA-1 keyed MAC + length extension ----
+
+/// The naive keyed MAC the challenges attack: SHA1(key || msg).
+/// Forgery-proof ONLY against attackers who can't extend the hash —
+/// which SHA-1's structure does not provide.
+pub fn sha1_mac(key: &[u8], msg: &[u8]) -> [u8; 20] {
+    sha1::sha1(&[key, msg].concat())
+}
+
+/// ch29: forge a valid MAC for `key || msg || glue || suffix` WITHOUT
+/// the key, from (mac, orig_len, key_len_guess). The original MAC is
+/// the intermediate chaining state after the padding block; resume from
+/// it with the glue padding accounted, then absorb the suffix.
+/// Returns (forged_mac, glue) — the attacker sends msg||glue||suffix.
+pub fn sha1_length_extend(
+    mac: &[u8; 20],
+    orig_len: usize,
+    key_len_guess: usize,
+    suffix: &[u8],
+) -> ([u8; 20], Vec<u8>) {
+    let mut h = [0u32; 5];
+    for (i, w) in h.iter_mut().enumerate() {
+        *w = u32::from_be_bytes(mac[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+    let base_len = (key_len_guess + orig_len) as u64;
+    let glue = sha1::Sha1::glue_padding(base_len);
+    let mut ext = sha1::Sha1::from_state(h, base_len + glue.len() as u64);
+    ext.update(suffix);
+    (ext.finalize(), glue)
+}
+
+/// Sweep key-length guesses — the attacker doesn't know the key length,
+/// so try each and let the SERVER's verification pick the winner.
+pub fn forge_admin_request(
+    mac: &[u8; 20],
+    msg: &[u8],
+    suffix: &[u8],
+    max_key_len: usize,
+) -> Option<(usize, Vec<u8>, [u8; 20])> {
+    for klen in 0..=max_key_len {
+        let (forged, glue) = sha1_length_extend(mac, msg.len(), klen, suffix);
+        let mut forged_msg = msg.to_vec();
+        forged_msg.extend(&glue);
+        forged_msg.extend(suffix);
+        // the real check happens server-side with the real key; the
+        // caller supplies the oracle (here, the test's verify closure)
+        if VERIFY_ORACLE.with(|f| (f.borrow_mut())(&forged_msg, &forged)) {
+            return Some((klen, forged_msg, forged));
+        }
+    }
+    None
+}
+
+use std::cell::RefCell;
+thread_local! {
+    /// Server-side MAC oracle the attack may query (verified against
+    /// the real key inside the test).
+    pub static VERIFY_ORACLE: RefCell<Box<dyn FnMut(&[u8], &[u8; 20]) -> bool>> =
+        RefCell::new(Box::new(|_, _| false));
+}
