@@ -641,3 +641,76 @@ fn ch34_mitm_substitution_forces_predictable_keys() {
     assert_eq!(key_b, modexp(&b.public, &z, &p), "attacker derives B's key");
     assert_ne!(key_a, key_b, "A and B share nothing with each other");
 }
+
+#[test]
+fn ch35_negotiated_group_leaks_secret_parity() {
+    use cryptopals::negotiated_group_key;
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g_minus_1 = &p - BigUint::from(1u32);
+    // order-2 subgroup: key is 1 for even exponents, p-1 for odd
+    assert_eq!(negotiated_group_key(&g_minus_1, &BigUint::from(100u64), &p), BigUint::from(1u32));
+    assert_eq!(negotiated_group_key(&g_minus_1, &BigUint::from(101u64), &p), g_minus_1);
+    // g'=1: the key is always 1 — zero bits of entropy
+    assert_eq!(negotiated_group_key(&BigUint::from(1u32), &BigUint::from(999u64), &p), BigUint::from(1u32));
+}
+
+#[test]
+fn ch36_srp_client_and_server_agree() {
+    use cryptopals::{SrpClient, SrpServer};
+    use num_bigint::BigUint;
+    let n = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let salt = b"pepper".to_vec();
+    let password = b"correct horse";
+    let server = SrpServer::setup(&n, &g, &salt, password, BigUint::from(777u64), BigUint::from(555u64));
+    let client = SrpClient::new(&n, &g, BigUint::from(1234u64));
+    let ks = server.session(&client.pub_a);
+    let kc = client.session(&salt, password, &server.pub_b, &server.u);
+    assert_eq!(ks, kc, "SRP client and server must derive the same session key");
+    // wrong password on the client side must NOT match
+    let kw = client.session(&salt, b"wrong horse", &server.pub_b, &server.u);
+    assert_ne!(kw, ks, "a wrong password must derive a different key");
+}
+
+#[test]
+fn ch37_srp_zero_key_bypasses_password() {
+    use cryptopals::{SrpClient, SrpServer, srp_zero_key_client};
+    use num_bigint::BigUint;
+    let n = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let salt = b"pepper".to_vec();
+    // the server stores a verifier for the REAL password
+    let server = SrpServer::setup(&n, &g, &salt, b"real password", BigUint::from(777u64), BigUint::from(555u64));
+    // attacker sends A = 0 — the server's S collapses to 0
+    let forged_a = BigUint::from(0u32);
+    let ks = server.session(&forged_a);
+    let kc = srp_zero_key_client(); // attacker computes S=0 client-side
+    assert_eq!(ks, kc, "A=0 must make the server accept the S=0 proof");
+}
+
+#[test]
+fn ch38_srp_offline_dictionary_recovers_password() {
+    use cryptopals::{SrpClient, srp_offline_dictionary};
+    use num_bigint::BigUint;
+    let n = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let true_password = "hunter2correct";
+    // FAKE server: attacker picks salt, b, u (server-chosen u is the flaw)
+    let salt = b"attacker salt".to_vec();
+    let b = BigUint::from(424242u64);
+    let u = BigUint::from(1337u64);
+    // the fake server does NOT know the password — no verifier needed.
+    // B must be a value that makes client-side math valid: 3*g^x < B + N
+    // holds for any B < N, so pick B = g^b + 1
+    let server_pub_b = cryptopals::modexp(&g, &b, &n) + BigUint::from(1u32);
+    // the client (legitimate user) logs in with the real password
+    let client = SrpClient::new(&n, &g, BigUint::from(31337u64));
+    let proof = client.session(&salt, true_password.as_bytes(), &server_pub_b, &u);
+    // the attacker now brute-forces OFFLINE with the dictionary
+    let dict = ["password1", "letmein", "hunter2correct", "qwerty"];
+    let found = srp_offline_dictionary(
+        &n, &g, &salt, &server_pub_b, &u, &client.pub_a, &client.priv_a, &proof, &dict,
+    );
+    assert_eq!(found.as_deref(), Some(true_password), "offline dictionary must recover the password");
+}

@@ -1076,3 +1076,119 @@ pub fn hastad_broadcast_attack(
 pub fn mitm_substituted_key(substituted_public: &BigUint, exponent: &BigUint, p: &BigUint) -> BigUint {
     modexp(substituted_public, exponent, p)
 }
+
+// ---- Set 5 ch35: negotiated-group injection leaks key bits ----
+
+/// Proposing g' = p-1 (order 2) as the "negotiated group": the session
+/// key becomes 1 if the peer's exponent is even, p-1 if odd — the
+/// attacker reads one bit of the secret per exchange. With g'=1 the
+/// key is always 1.
+pub fn negotiated_group_key(g_prime: &BigUint, exponent: &BigUint, p: &BigUint) -> BigUint {
+    modexp(g_prime, exponent, p)
+}
+
+// ---- Set 5 ch36-38: SRP (Secure Remote Password) ----
+// Deviations from the site spec, documented: H = SHA-1 (the site asks
+// SHA-256; the protocol lessons are hash-agnostic) and k = 3 fixed
+// (per the site). The arithmetic is SRP-6a.
+
+pub fn srp_x(salt: &[u8], password: &[u8]) -> BigUint {
+    let h = sha1::sha1(&[salt, password].concat());
+    BigUint::from_bytes_be(&h)
+}
+
+fn srp_sub_mod(a: &BigUint, b: &BigUint, n: &BigUint) -> BigUint {
+    // unsigned subtraction trap: wrap through the modulus
+    (a + n - b) % n
+}
+
+pub struct SrpServer {
+    pub n: BigUint,
+    pub g: BigUint,
+    pub salt: Vec<u8>,
+    pub v: BigUint,   // verifier g^x mod N
+    pub priv_b: BigUint,
+    pub pub_b: BigUint, // B = 3v + g^b mod N
+    pub u: BigUint,   // server-chosen u — the ch38 vulnerability
+}
+
+impl SrpServer {
+    pub fn setup(n: &BigUint, g: &BigUint, salt: &[u8], password: &[u8], b: BigUint, u: BigUint) -> Self {
+        let x = srp_x(salt, password);
+        let v = modexp(g, &x, n);
+        let k = BigUint::from(3u32);
+        let pub_b = (&k * &v + modexp(g, &b, n)) % n;
+        SrpServer { n: n.clone(), g: g.clone(), salt: salt.to_vec(), v, priv_b: b, pub_b, u }
+    }
+
+    /// Server-side session: S = (A * v^u)^b mod N; K = H(S).
+    pub fn session(&self, client_pub_a: &BigUint) -> BigUint {
+        let s = modexp(&(client_pub_a * &self.v.modpow(&self.u, &self.n) % &self.n), &self.priv_b, &self.n);
+        let h = sha1::sha1(&s.to_bytes_be());
+        BigUint::from_bytes_be(&h)
+    }
+}
+
+pub struct SrpClient {
+    pub n: BigUint,
+    pub g: BigUint,
+    pub priv_a: BigUint,
+    pub pub_a: BigUint, // A = g^a mod N (or a forged value)
+}
+
+impl SrpClient {
+    pub fn new(n: &BigUint, g: &BigUint, a: BigUint) -> Self {
+        let pub_a = modexp(g, &a, n);
+        SrpClient { n: n.clone(), g: g.clone(), priv_a: a, pub_a }
+    }
+
+    /// Client-side session: S = (B - 3*g^x)^(a + u*x) mod N.
+    pub fn session(&self, salt: &[u8], password: &[u8], server_pub_b: &BigUint, u: &BigUint) -> BigUint {
+        let x = srp_x(salt, password);
+        let k = BigUint::from(3u32);
+        let base = srp_sub_mod(server_pub_b, &(&k * &modexp(&self.g, &x, &self.n) % &self.n), &self.n);
+        let exp = &self.priv_a + &(u * &x);
+        let s = modexp(&base, &exp, &self.n);
+        let h = sha1::sha1(&s.to_bytes_be());
+        BigUint::from_bytes_be(&h)
+    }
+}
+
+/// ch37: the A=0 attack — the client sends A=0, so the server computes
+/// S = (0 * v^u)^b = 0 regardless of the stored password; a client that
+/// also assumes S=0 produces the matching proof.
+pub fn srp_zero_key_client() -> BigUint {
+    let s = BigUint::zero();
+    let h = sha1::sha1(&s.to_bytes_be());
+    BigUint::from_bytes_be(&h)
+}
+
+/// ch38: offline dictionary attack against the server-chosen-u
+/// variant. A fake server (it chose salt, B, u) records the client's
+/// proof; for each dictionary password it recomputes the client-side
+/// S/K OFFLINE and matches the proof.
+pub fn srp_offline_dictionary(
+    n: &BigUint,
+    g: &BigUint,
+    salt: &[u8],
+    server_pub_b: &BigUint,
+    u: &BigUint,
+    _client_pub_a: &BigUint, // unused: the offline attack needs only (salt,B,u,a) and the proof
+    client_priv_a: &BigUint,
+    proof: &BigUint,
+    dictionary: &[&str],
+) -> Option<String> {
+    for pw in dictionary {
+        let x = srp_x(salt, pw.as_bytes());
+        let k = BigUint::from(3u32);
+        let base = srp_sub_mod(server_pub_b, &(&k * &modexp(g, &x, n) % n), n);
+        let exp = client_priv_a + &(u * &x);
+        let s = modexp(&base, &exp, n);
+        let h = sha1::sha1(&s.to_bytes_be());
+        let candidate = BigUint::from_bytes_be(&h);
+        if &candidate == proof {
+            return Some((*pw).to_string());
+        }
+    }
+    None
+}
