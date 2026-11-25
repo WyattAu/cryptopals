@@ -540,3 +540,96 @@ pub fn xor_keystream(data: &[u8], ks: &[u8]) -> Vec<u8> {
         .map(|(i, &b)| b ^ ks[i % ks.len()])
         .collect()
 }
+
+// ---- Set 3 ch21-23: MT19937 — implement, recover seed, clone ----
+
+/// MT19937 (Matsumoto & Nishimura 1998), init_genrand seeding per the
+/// ch21 spec and the published reference pseudocode. Validated against
+/// the reference stream (seed 5489 → 3499211612, ...).
+pub struct Mt19937 {
+    mt: [u32; 624],
+    idx: usize,
+}
+
+impl Mt19937 {
+    pub fn new(seed: u32) -> Self {
+        let mut mt = [0u32; 624];
+        mt[0] = seed;
+        for i in 1..624 {
+            mt[i] = 1812433253u32
+                .wrapping_mul(mt[i - 1] ^ (mt[i - 1] >> 30))
+                .wrapping_add(i as u32);
+        }
+        Mt19937 { mt, idx: 624 }
+    }
+
+    fn twist(&mut self) {
+        for i in 0..624 {
+            let y = (self.mt[i] & 0x8000_0000) | (self.mt[(i + 1) % 624] & 0x7fff_ffff);
+            let mut next = self.mt[(i + 397) % 624] ^ (y >> 1);
+            if y & 1 != 0 {
+                next ^= 0x9908_b0df;
+            }
+            self.mt[i] = next;
+        }
+        self.idx = 0;
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        if self.idx >= 624 {
+            self.twist();
+        }
+        let mut y = self.mt[self.idx];
+        self.idx += 1;
+        // tempering
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c_5680;
+        y ^= (y << 15) & 0xefc6_0000;
+        y ^= y >> 18;
+        y
+    }
+}
+
+/// ch22: the seed was time.time() within a known window; the first
+/// output is observed — brute-force the window.
+pub fn recover_mt_seed(first_output: u32, lo: u32, hi: u32) -> Option<u32> {
+    (lo..=hi).find(|&seed| Mt19937::new(seed).next_u32() == first_output)
+}
+
+/// Untempering: invert the four tempering steps by iterated
+/// substitution (each step's inverse converges in ceil(32/shift) iters).
+fn unshift_right(y: u32, shift: u32) -> u32 {
+    let mut res = y;
+    for _ in 0..32 / shift + 1 {
+        res = y ^ (res >> shift);
+    }
+    res
+}
+
+fn unshift_left(y: u32, shift: u32, mask: u32) -> u32 {
+    let mut res = y;
+    for _ in 0..32 / shift + 1 {
+        res = y ^ ((res << shift) & mask);
+    }
+    res
+}
+
+/// Inverts the tempering of one output, recovering the raw state word.
+pub fn untemper(y: u32) -> u32 {
+    let y = unshift_right(y, 18);
+    let y = unshift_left(y, 15, 0xefc6_0000);
+    let y = unshift_left(y, 7, 0x9d2c_5680);
+    unshift_right(y, 11)
+}
+
+/// ch23: 624 consecutive outputs fully determine MT19937's internal
+/// state — untremper them into the state array (idx = 624, forcing the
+/// same regeneration schedule as the original) and the clone reproduces
+/// the rest of the stream exactly.
+pub fn clone_mt19937(outputs: &[u32; 624]) -> Mt19937 {
+    let mut mt = [0u32; 624];
+    for (i, &o) in outputs.iter().enumerate() {
+        mt[i] = untemper(o);
+    }
+    Mt19937 { mt, idx: 624 }
+}

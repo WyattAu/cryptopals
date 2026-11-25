@@ -344,3 +344,44 @@ fn ch19_ch20_fixed_nonce_ctr_keystream_recovered() {
         "decrypted text must be mostly dictionary words: {good}/{total} — got: {text:.60}"
     );
 }
+
+#[test]
+fn ch21_mt19937_matches_reference_stream() {
+    use cryptopals::Mt19937;
+    let mut mt = Mt19937::new(5489);
+    let expected: [u32; 8] = [
+        3499211612, 581869302, 3890346734, 3586334585,
+        545404204, 4161255391, 3922919429, 949333985,
+    ];
+    for e in expected {
+        assert_eq!(mt.next_u32(), e, "MT19937 must reproduce the published reference stream");
+    }
+}
+
+#[test]
+fn ch22_recovers_time_seeded_value() {
+    use cryptopals::{Mt19937, recover_mt_seed};
+    let true_seed = 1_765_000_123u32; // stand-in for a time.time() value
+    let first = Mt19937::new(true_seed).next_u32();
+    let recovered = recover_mt_seed(first, true_seed - 100, true_seed + 100)
+        .expect("seed must be recoverable within the window");
+    assert_eq!(recovered, true_seed);
+}
+
+#[test]
+fn ch23_clone_reproduces_the_stream() {
+    use cryptopals::{Mt19937, clone_mt19937};
+    let mut original = Mt19937::new(42);
+    let mut outputs = [0u32; 624];
+    for o in &mut outputs {
+        *o = original.next_u32();
+    }
+    let mut clone = clone_mt19937(&outputs);
+    for i in 0..1000 {
+        assert_eq!(
+            original.next_u32(),
+            clone.next_u32(),
+            "clone must reproduce the original stream exactly (output {i})"
+        );
+    }
+}
