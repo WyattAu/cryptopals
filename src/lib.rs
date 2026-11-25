@@ -1,6 +1,7 @@
 //! Cryptopals Set 1 — Basics. Solutions in pure Rust, std only.
 
 pub mod aes;
+pub mod sha1;
 
 pub fn hex_decode(s: &str) -> Vec<u8> {
     (0..s.len() / 2)
