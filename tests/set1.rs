@@ -198,3 +198,20 @@ fn ch7_aes128_encrypt_fips197_roundtrip() {
     // round-trip
     assert_eq!(aes::aes128_ecb_decrypt_block(&enc, &key), pt);
 }
+
+#[test]
+fn ch9_pkcs7_roundtrip() {
+    use cryptopals::{pkcs7_pad, pkcs7_unpad};
+    let padded = pkcs7_pad(b"YELLOW SUBMARINE", 20);
+    assert_eq!(padded.len(), 20);
+    assert_eq!(pkcs7_unpad(&padded, 20), Some(&b"YELLOW SUBMARINE"[..]));
+}
+
+#[test]
+fn ch12_breaks_the_oracle() {
+    use cryptopals::{break_ecb_oracle, EcbOracle};
+    let secret = b"I am the hidden suffix, byte-at-a-time you cannot hide me!!";
+    let oracle = EcbOracle::new(secret);
+    let recovered = break_ecb_oracle(&oracle);
+    assert_eq!(recovered, secret.to_vec(), "recovered bytes must match the secret");
+}

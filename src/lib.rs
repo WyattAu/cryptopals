@@ -182,3 +182,105 @@ pub fn detect_ecb(data: &[u8]) -> Vec<usize> {
         .map(|(i, _)| i)
         .collect()
 }
+
+// ---- Set 2 ch9: PKCS#7 padding ----
+
+pub fn pkcs7_pad(data: &[u8], block: usize) -> Vec<u8> {
+    let pad = (block - data.len() % block) as u8;
+    let mut out = data.to_vec();
+    out.extend(std::iter::repeat(pad).take(pad as usize));
+    out
+}
+
+pub fn pkcs7_unpad(data: &[u8], block: usize) -> Option<&[u8]> {
+    let pad = *data.last()?;
+    if pad == 0 || pad as usize > block || pad as usize > data.len() {
+        return None;
+    }
+    if data[data.len() - pad as usize..].iter().any(|&b| b != pad) {
+        return None;
+    }
+    Some(&data[..data.len() - pad as usize])
+}
+
+// ---- Set 2 ch12: the ECB oracle + byte-at-a-time attack ----
+
+pub struct EcbOracle {
+    key: [u8; 16],
+    secret: Vec<u8>,
+}
+
+impl EcbOracle {
+    /// The "server": appends its fixed secret to your input and
+    /// ECB-encrypts the whole thing under a fixed key (PKCS#7-padded).
+    pub fn new(secret: &[u8]) -> Self {
+        let mut key = [0u8; 16];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0xA5;
+        }
+        EcbOracle { key, secret: secret.to_vec() }
+    }
+
+    pub fn encrypt(&self, input: &[u8]) -> Vec<u8> {
+        let mut buf = input.to_vec();
+        buf.extend_from_slice(&self.secret);
+        let padded = pkcs7_pad(&buf, 16);
+        let key = self.key;
+        // ECB over 16-aligned blocks
+        padded.chunks_exact(16).map(|b| {
+            let mut st = [0u8; 16];
+            st.copy_from_slice(b);
+            let enc = crate::aes::aes128_ecb_encrypt_block(&st, &key);
+            enc.to_vec()
+        }).flatten().collect()
+    }
+}
+
+/// Detect the oracle's block size: the first input length where the
+/// ciphertext grows by more than the secret's worth.
+pub fn detect_block_size(oracle: &EcbOracle) -> usize {
+    let l0 = oracle.encrypt(&[]).len();
+    let mut n = 1usize;
+    loop {
+        let ln = oracle.encrypt(&vec![b'A'; n]).len();
+        if ln > l0 {
+            return ln - l0;
+        }
+        n += 1;
+    }
+}
+
+/// The attack: recover the oracle's secret byte-at-a-time.
+pub fn break_ecb_oracle(oracle: &EcbOracle) -> Vec<u8> {
+    let bs = detect_block_size(oracle);
+    let mut known: Vec<u8> = Vec::new();
+    loop {
+        let i = known.len();
+        let filler_len = bs - 1 - (i % bs);
+        let filler = vec![b'A'; filler_len];
+        let base = oracle.encrypt(&filler);
+        let chunk = (filler_len + i) / bs;
+        let ref_blk = &base[chunk * bs..(chunk + 1) * bs];
+        let mut matched = None;
+        for b in 0..=255u8 {
+            let mut attempt = filler.clone();
+            attempt.extend_from_slice(&known);
+            attempt.push(b);
+            let out = oracle.encrypt(&attempt);
+            if &out[chunk * bs..(chunk + 1) * bs] == ref_blk {
+                matched = Some(b);
+                break;
+            }
+        }
+        match matched {
+            Some(b) => known.push(b),
+            None => break,
+        }
+    }
+    // the oracle pads its output — strip the (correctly recovered)
+    // PKCS#7 padding from the tail before returning
+    match pkcs7_unpad(&known, bs) {
+        Some(t) => t.to_vec(),
+        None => known,
+    }
+}
