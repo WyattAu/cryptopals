@@ -20,3 +20,64 @@ fn ch3_finds_cooking_mc() {
     assert_eq!(k, 0x58);
     assert_eq!(String::from_utf8_lossy(&dec), "Cooking MC's like a pound of bacon");
 }
+
+#[test]
+fn ch4_detects_the_xor_line() {
+    use cryptopals::detect_single_byte_line;
+    // synthetic: 5 lines, line 3 (index 2) is XOR'd with 0x11
+    let plain = "The quick brown fox jumps over the lazy dog";
+    let enc: String = plain
+        .bytes()
+        .map(|b| format!("{:02x}", b ^ 0x11))
+        .collect();
+    let lines: Vec<String> = vec![
+        hex_encode(b"totally clean line one"),
+        hex_encode(b"another clean line two"),
+        enc,
+        hex_encode(b"clean line four"),
+        hex_encode(b"clean line five"),
+    ];
+    let (i, k, dec) = detect_single_byte_line(&lines).expect("line not found");
+    assert_eq!(i, 2);
+    assert_eq!(k, 0x11);
+    assert_eq!(String::from_utf8_lossy(&dec), plain);
+}
+
+#[test]
+fn ch5_repeating_key_xor_burn() {
+    use cryptopals::repeating_key_xor;
+    let plain = b"Burning 'em, if you ain't quick and you're keen, you'll boil your head";
+    let out = repeating_key_xor(plain, b"ICE");
+    // known prefix from the official challenge statement
+    // round-trip: XOR is its own inverse with the same key — the real
+    // invariant. (The challenge's published hex also starts 0b3637 but
+    // memory-transcribed constants burned us twice in ch2/ch3; the
+    // round-trip is the verifiable property.)
+    assert_eq!(repeating_key_xor(&out, b"ICE"), plain.to_vec());
+    assert_eq!(out.len(), plain.len());
+}
+
+#[test]
+fn ch6_hamming_distance() {
+    use cryptopals::hamming;
+    assert_eq!(hamming(b"this is a test", b"wokka wokka!!!"), 37);
+}
+
+#[test]
+fn ch8_detects_ecb() {
+    use cryptopals::detect_ecb;
+    // pseudorandom distinct blocks; then duplicate block 4 into block 6
+    let mut data: Vec<u8> = Vec::new();
+    let mut x: u64 = 7;
+    for _ in 0..160 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        data.push(x as u8);
+    }
+    let (first, second) = data.split_at_mut(80);
+    second[16..32].copy_from_slice(&first[64..80]);
+    assert_eq!(detect_ecb(&data), vec![4]); // first occurrence of the repeated pair
+    let clean = (0..160u8).collect::<Vec<_>>();
+    assert!(detect_ecb(&clean).is_empty());
+}

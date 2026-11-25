@@ -62,3 +62,68 @@ pub fn single_byte_xor_best(cipher: &[u8]) -> (u8, f64, Vec<u8>) {
     }
     best
 }
+
+/// Ch4: find the line (and key) that was single-byte-XOR'd.
+pub fn detect_single_byte_line(lines: &[String]) -> Option<(usize, u8, Vec<u8>)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let raw = hex_decode(l);
+            if raw.is_empty() {
+                return None;
+            }
+            let (k, score, dec) = single_byte_xor_best(&raw);
+            if score > 200.0 && dec.iter().all(|&c| (32..127).contains(&c) || c == b'\n') {
+                Some((i, k, dec))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(_, _, dec)| {
+            dec.iter().filter(|c| c.is_ascii_alphabetic() || **c == b' ').count()
+        })
+}
+
+/// Ch5: repeating-key XOR.
+pub fn repeating_key_xor(plain: &[u8], key: &[u8]) -> Vec<u8> {
+    plain
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b ^ key[i % key.len()])
+        .collect()
+}
+
+/// Hamming distance between two equal-length byte slices.
+pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
+    a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
+}
+
+/// Ch6: rank keysizes 2..=40 by normalized Hamming distance, return best few.
+pub fn rank_keysizes(data: &[u8]) -> Vec<(f64, usize)> {
+    let mut ranked: Vec<(f64, usize)> = (2..=40)
+        .map(|ks| {
+            let chunks = data.len() / ks;
+            let mut dists = Vec::new();
+            let mut i = 0;
+            while i + 2 * ks <= data.len() && chunks > 1 {
+                dists.push(hamming(&data[i..i + ks], &data[i + ks..i + 2 * ks]) as f64 / ks as f64);
+                i += 2 * ks;
+            }
+            (dists.iter().sum::<f64>() / dists.len() as f64, ks)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    ranked
+}
+
+/// Ch8: detect AES-ECB by repeated 16-byte blocks.
+pub fn detect_ecb(data: &[u8]) -> Vec<usize> {
+    data.chunks(16)
+        .enumerate()
+        .filter(|(i, block)| {
+            data.chunks(16).skip(i + 1).any(|other| other == *block)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
