@@ -215,3 +215,12 @@ fn ch12_breaks_the_oracle() {
     let recovered = break_ecb_oracle(&oracle);
     assert_eq!(recovered, secret.to_vec(), "recovered bytes must match the secret");
 }
+
+#[test]
+fn ch13_ecb_cut_and_paste() {
+    use cryptopals::{profile_for, sanitize, run_attack};
+    assert_eq!(sanitize("foo=a=b&c"), "fooabc");
+    assert_eq!(profile_for("a@b.com"), "email=a@b.com&uid=10&role=user");
+    let role = run_attack();
+    assert_eq!(role, "admin", "cut-and-paste must promote role to admin");
+}

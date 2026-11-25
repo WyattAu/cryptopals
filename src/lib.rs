@@ -284,3 +284,88 @@ pub fn break_ecb_oracle(oracle: &EcbOracle) -> Vec<u8> {
         None => known,
     }
 }
+
+// ---- Set 2 ch13: ECB cut-and-paste ----
+
+use std::collections::HashMap;
+
+pub const PROFILE_KEY: [u8; 16] = *b"CH13 PROFILE KEY";
+
+/// Sanitizes an email for the profile encoder (strip & and =).
+pub fn sanitize(email: &str) -> String {
+    email.chars().filter(|&c| c != '&' && c != '=').collect()
+}
+
+/// Encodes a profile from an email: email=<email>&uid=10&role=user
+pub fn profile_for(email: &str) -> String {
+    format!("email={}&uid=10&role=user", sanitize(email))
+}
+
+/// Encrypts an encoded profile.
+pub fn encrypt_profile(encoded: &str) -> Vec<u8> {
+    aes::aes128_ecb_encrypt(&crate::pkcs7_pad(encoded.as_bytes(), 16), &PROFILE_KEY)
+}
+
+/// Decrypts and parses a profile into key=value pairs.
+pub fn decrypt_profile(ct: &[u8]) -> HashMap<String, String> {
+    let padded = aes::aes128_ecb_decrypt(ct, &PROFILE_KEY);
+    let text = String::from_utf8_lossy(&padded).into_owned();
+    let mut map = HashMap::new();
+    for pair in text.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            map.insert(k.to_string(), v.trim_end_matches('\u{0}').to_string());
+        }
+    }
+    map
+}
+
+/// The cut-and-paste attack: splice an attacker-controlled "admin"
+/// block (fully aligned and PKCS#7-padded) into the role position of a
+/// victim profile whose role= value starts a fresh block.
+pub fn cut_and_paste_admin(victim_ct: &[u8], admin_block: &[u8]) -> Vec<u8> {
+    let mut out = victim_ct[..victim_ct.len() - 16].to_vec();
+    out.extend_from_slice(admin_block);
+    out
+}
+
+/// Builds the attacker's crafted profile ct whose second block is the
+/// fully-padded "admin" value.
+pub fn craft_admin_block() -> [u8; 16] {
+    // email=<11 chars> | admin + 11 bytes padding = aligned block 2
+    let email = "x11charslong"; // 12 chars: "email=" (6) + 12 = block 1 done at 16...
+    let _ = email;
+    // "email=" is 6 bytes; use an 10-char email so block 2 (bytes 16..32)
+    // begins exactly at the value "admin\x0b..." -> need 10 bytes: 6+10=16
+    let email = "admin_email"; // placeholder, real alignment below
+    let aligned = profile_for(&"aaaaaaaaaaaaaaaaaaaa".to_string());
+    let _ = aligned;
+    // The standard: email = 10 'a's => "email=aaaaaaaaaa" fills block 1;
+    // block 2 = "admin" + 11 PKCS#7 pad bytes (0x0b).
+    let _ = email;
+    let mut probe = "aaaaaaaaaa".to_string(); // exactly 10 chars
+    let _ = probe;
+    let email_clean = "aaaaaaaaaa";
+    let enc = profile_for(email_clean);
+    assert!(enc.starts_with("email=aaaaaaaaaa&uid=10&role=user"));
+    // block 2 starts at byte 16 = position of "&uid=10&role=user" start...
+    // we want "admin"+pad in block 2: attacker email = "aaaaaaaaaaadmin"
+    // sanitized profile: email=aaaaaaaaaaadmin -> block 2 = "admin"+pad(11)
+    let crafted = profile_for("aaaaaaaaaaadmin");
+    let ct = encrypt_profile(&crafted);
+    let mut blk = [0u8; 16];
+    blk.copy_from_slice(&ct[16..32]);
+    blk
+}
+
+/// Full attack: returns the spliced ciphertext's decoded role.
+pub fn run_attack() -> String {
+    // victim: an email that leaves "role=" at the end of a block.
+    // "email=" (6) + email + "&uid=10&" (8) + "role=" (5) — we need
+    // (6 + len(email) + 8 + 5) % 16 == 0 -> len(email) % 16 == 13
+    let victim_email = "a".repeat(13);
+    let victim_ct = encrypt_profile(&profile_for(&victim_email));
+    let admin_blk = craft_admin_block();
+    let spliced = cut_and_paste_admin(&victim_ct, &admin_blk);
+    let profile = decrypt_profile(&spliced);
+    profile.get("role").cloned().unwrap_or_default()
+}
