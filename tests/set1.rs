@@ -608,3 +608,36 @@ fn ch40_hastad_broadcast_attack() {
     );
     assert_eq!(rec, m, "Håstad's broadcast attack must recover the message");
 }
+
+#[test]
+fn ch34_mitm_substitution_forces_predictable_keys() {
+    use cryptopals::{DhParty, mitm_substituted_key};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let a = DhParty::new(&g, &p, BigUint::from(42u64));
+    let b = DhParty::new(&g, &p, BigUint::from(4242u64));
+    // honest exchange: the shared key is unpredictable without a or b
+    let honest = a.session_key(&b.public, &p);
+    assert_ne!(honest, BigUint::from(0u32));
+    assert_ne!(honest, BigUint::from(1u32));
+    // MITM replaces both publics with p -> both parties derive 0
+    let zero_key = mitm_substituted_key(&p, &a.secret, &p);
+    assert_eq!(zero_key, BigUint::from(0u32), "public=p forces session key 0");
+    // ...or with 1 -> both derive 1
+    assert_eq!(
+        mitm_substituted_key(&BigUint::from(1u32), &b.secret, &p),
+        BigUint::from(1u32)
+    );
+    // full relay MITM: the attacker runs its OWN DH with each party
+    // (secret z, public g^z sent to both) — each side shares only with
+    // the attacker, and both keys are derivable without a or b
+    use cryptopals::modexp;
+    let z = BigUint::from(9999u64);
+    let attacker_pub = modexp(&g, &z, &p);
+    let key_a = a.session_key(&attacker_pub, &p); // g^(az)
+    let key_b = b.session_key(&attacker_pub, &p); // g^(bz)
+    assert_eq!(key_a, modexp(&a.public, &z, &p), "attacker derives A's key");
+    assert_eq!(key_b, modexp(&b.public, &z, &p), "attacker derives B's key");
+    assert_ne!(key_a, key_b, "A and B share nothing with each other");
+}

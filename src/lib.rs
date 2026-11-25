@@ -1068,3 +1068,11 @@ pub fn hastad_broadcast_attack(
     // x = m^3 (as an integer, since m < min(n_i) => m^3 < N); take cbrt
     icbrt(&x)
 }
+
+/// ch34: the MITM substitution attack, concretely. The attacker relays
+/// crafted publics instead of the real ones: passing p makes each party
+/// compute p^x mod p = 0; passing 1 gives 1; passing g gives g. All
+/// three are KEY-FREE — the attacker reads every "encrypted" message.
+pub fn mitm_substituted_key(substituted_public: &BigUint, exponent: &BigUint, p: &BigUint) -> BigUint {
+    modexp(substituted_public, exponent, p)
+}
