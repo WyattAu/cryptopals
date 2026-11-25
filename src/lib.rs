@@ -154,6 +154,24 @@ pub fn rank_keysizes(data: &[u8]) -> Vec<(f64, usize)> {
     ranked
 }
 
+/// Ch11: detect whether `data` was encrypted with ECB or CBC.
+/// ECB leaks repeated 16-byte blocks when the plaintext repeats;
+/// CBC never produces them (each block's input is the previous
+/// ciphertext). Statistical, not proof — but on structured plaintext
+/// it's decisive.
+pub fn detect_mode(data: &[u8]) -> &'static str {
+    if detect_ecb(data).is_empty() {
+        "cbc"
+    } else {
+        "ecb"
+    }
+}
+
+/// Ch11 batch: classify a list of ciphertexts.
+pub fn detect_modes(data: &[Vec<u8>]) -> Vec<&'static str> {
+    data.iter().map(|d| detect_mode(d)).collect()
+}
+
 /// Ch8: detect AES-ECB by repeated 16-byte blocks.
 pub fn detect_ecb(data: &[u8]) -> Vec<usize> {
     data.chunks(16)

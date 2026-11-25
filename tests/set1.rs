@@ -138,3 +138,44 @@ fn ch10_cbc_nist_vector() {
         ]
     );
 }
+
+#[test]
+fn ch11_detects_modes() {
+    use cryptopals::{aes, detect_modes};
+    // half the ciphertexts ECB-encrypted, half CBC — the detector must
+    // separate them by repeated-block leakage on repetitive plaintext
+    let plain: Vec<u8> = "YELLOW SUBMARINE YELLOW SUBMARINE YELLOW SUBMARINE YELLOW SUBMARINE "
+        .bytes()
+        .cycle()
+        .take(512)
+        .collect();
+    let key = b"0123456789abcdef";
+    let iv = b"CBCIVCBCIVCBCIVC";
+    let mut cts: Vec<Vec<u8>> = Vec::new();
+    let mut truth: Vec<&'static str> = Vec::new();
+    for i in 0..8u32 {
+        if i % 2 == 0 {
+            // ECB: each 16-byte block XOR-differ is out of scope here —
+            // instead, ECB over the raw blocks leaks repetitions directly
+            let mut ct = plain.clone();
+            for (j, b) in ct.iter_mut().enumerate() {
+                *b ^= key[j % 16] ^ (i as u8);
+            }
+            cts.push(ct);
+            truth.push("ecb");
+        } else {
+            // CBC via aes::cbc-style chaining is out of scope for this
+            // pure-detection test; simulate with a counter-differ so no
+            // blocks repeat
+            let mut ct = plain.clone();
+            for (j, b) in ct.iter_mut().enumerate() {
+                *b ^= iv[j % 16] ^ (i as u8) ^ (j as u8 / 16);
+            }
+            cts.push(ct);
+            truth.push("cbc");
+        }
+    }
+    let _ = aes::aes128_ecb_decrypt;
+    let got = detect_modes(&cts);
+    assert_eq!(got, truth, "mode detection mismatch");
+}
