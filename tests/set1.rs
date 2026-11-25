@@ -92,3 +92,22 @@ fn ch7_aes128_fips197_vector() {
     let dec = aes::aes128_ecb_decrypt_block(&ct, &key);
     assert_eq!(dec, pt, "AES-128 decrypt must match FIPS-197 C.1");
 }
+
+#[test]
+fn ch7_real_data_decrypts_to_vanilla_ice() {
+    use cryptopals::aes;
+    use std::path::Path;
+    let path = Path::new("data/7.txt");
+    if !path.exists() {
+        return; // data file not present in this checkout
+    }
+    let b64 = std::fs::read_to_string(path).unwrap();
+    let ct = base64_decode(&b64);
+    let pt = aes::aes128_ecb_decrypt(&ct, b"YELLOW SUBMARINE");
+    let text = String::from_utf8_lossy(&pt);
+    assert!(
+        text.starts_with("I'm back and I'm ringin' the bell"),
+        "unexpected plaintext: {:.80}",
+        text
+    );
+}

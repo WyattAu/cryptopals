@@ -28,6 +28,41 @@ pub fn base64_encode(b: &[u8]) -> String {
     out
 }
 
+pub fn base64_decode(s: &str) -> Vec<u8> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let val = |c: u8| -> Option<u32> {
+        T.iter().position(|&t| t == c).map(|p| p as u32)
+            .or_else(|| match c { b'=' => None, _ => {
+                // url-safe alphabet tolerated
+                match c { b'-' => Some(62), b'_' => Some(63), _ => None }
+            }})
+    };
+    let mut out = Vec::new();
+    let clean: Vec<u8> = s.bytes().filter(|b| *b != b'\n' && *b != b'\r').collect();
+    for c in clean.chunks(4) {
+        let mut n = 0u32;
+        let mut pad = 0usize;
+        for (i, &ch) in c.iter().enumerate() {
+            match val(ch) {
+                Some(v) => n |= v << (18 - 6 * i),
+                None => pad += 1,
+            }
+        }
+        if c.len() < 2 {
+            break;
+        }
+        out.push((n >> 16) as u8);
+        if c.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if c.len() > 3 {
+            out.push(n as u8);
+        }
+        let _ = pad;
+    }
+    out
+}
+
 pub fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().zip(b).map(|(x, y)| x ^ y).collect()
 }
