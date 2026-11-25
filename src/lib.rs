@@ -939,3 +939,132 @@ where
     }
     recovered
 }
+
+// ---- Set 5: public-key crypto — modexp, modinv, DH, RSA ----
+
+use num_bigint::BigUint;
+use num_traits::{One, Zero};
+
+/// Modular exponentiation: (base^exp) mod m — square-and-multiply over
+/// num-bigint, the workhorse of every public-key primitive here.
+pub fn modexp(base: &BigUint, exp: &BigUint, m: &BigUint) -> BigUint {
+    assert!(!m.is_zero(), "modulus must be nonzero");
+    base.modpow(exp, m)
+}
+
+/// Modular inverse via extended Euclid (hand-rolled — the std crates
+/// in use don't expose one; returns None when gcd(a, m) != 1).
+pub fn modinv(a: &BigUint, m: &BigUint) -> Option<BigUint> {
+    if m.is_zero() || m.is_one() {
+        return None;
+    }
+    let (mut old_r, mut r) = (a % m, m.clone());
+    let (mut old_s, mut s) = (BigUint::one(), BigUint::zero());
+    while !r.is_zero() {
+        let q = &old_r / &r;
+        let new_r = &old_r - &q * &r;
+        old_r = std::mem::replace(&mut r, new_r);
+        // keep the Bezout coefficient in Z_m: BigUint is unsigned and
+        // the raw coefficient goes negative mid-loop (this panicked the
+        // ch39 keygen before the fix)
+        let qs_mod = &q * &s % m;
+        let new_s = (&old_s + m - &qs_mod) % m;
+        old_s = std::mem::replace(&mut s, new_s);
+    }
+    if old_r != BigUint::one() {
+        return None; // not invertible
+    }
+    Some(old_s % m)
+}
+
+/// Integer cube root (for Håstad's e=3 broadcast attack).
+pub fn icbrt(n: &BigUint) -> BigUint {
+    n.cbrt()
+}
+
+// ---- Set 5 ch33: Diffie-Hellman ----
+
+/// A Diffie-Hellman party: private x, public g^x mod p.
+pub struct DhParty {
+    pub secret: BigUint,
+    pub public: BigUint,
+}
+
+impl DhParty {
+    pub fn new(g: &BigUint, p: &BigUint, secret: BigUint) -> Self {
+        let public = modexp(g, &secret, p);
+        DhParty { secret, public }
+    }
+
+    /// The shared session secret: (other's public)^my private mod p.
+    pub fn session_key(&self, other_public: &BigUint, p: &BigUint) -> BigUint {
+        modexp(other_public, &self.secret, p)
+    }
+}
+
+/// MITM injection (ch34/ch35 family): the attacker replaces both
+/// publics with g itself, forcing both session keys to g.
+pub fn mitm_forced_session(g: &BigUint, p: &BigUint) -> (BigUint, BigUint) {
+    (modexp(g, &BigUint::one(), p), modexp(g, &BigUint::one(), p))
+}
+
+// ---- Set 5 ch39: RSA ----
+
+pub struct RsaKey {
+    pub n: BigUint, // modulus
+    pub e: BigUint, // public exponent
+    pub d: BigUint, // private exponent
+}
+
+impl RsaKey {
+    /// Keygen from distinct primes p, q and public exponent e:
+    /// n = pq, phi = (p-1)(q-1), d = e^-1 mod phi.
+    pub fn from_primes(p: &BigUint, q: &BigUint, e: &BigUint) -> Self {
+        let n = p * q;
+        let phi = (p - BigUint::one()) * (q - BigUint::one());
+        let d = modinv(e, &phi).expect("e must be invertible mod phi");
+        RsaKey { n, e: e.clone(), d }
+    }
+
+    pub fn encrypt(&self, m: &BigUint) -> BigUint {
+        modexp(m, &self.e, &self.n)
+    }
+
+    pub fn decrypt(&self, c: &BigUint) -> BigUint {
+        modexp(c, &self.d, &self.n)
+    }
+
+    /// Sign: exponentiate the message (a stand-in for a hash) with d.
+    pub fn sign(&self, m: &BigUint) -> BigUint {
+        self.decrypt(m)
+    }
+
+    /// Verify: exponentiate the signature with e, compare to message.
+    pub fn verify(&self, m: &BigUint, sig: &BigUint) -> bool {
+        self.encrypt(sig) == *m
+    }
+}
+
+// ---- Set 5 ch40: e=3 broadcast attack (Håstad) ----
+
+/// The same message sent to 3 recipients with e=3 and distinct moduli
+/// (no padding!) is recoverable: CRT the ciphertexts, take the integer
+/// cube root.
+pub fn hastad_broadcast_attack(
+    c: [&BigUint; 3],
+    n: [&BigUint; 3],
+) -> BigUint {
+    // CRT via explicit construction: x = sum(c_i * N_i * M_i) mod N,
+    // N_i = N/n_i, M_i = N_i^-1 mod n_i
+    let big_n: BigUint = n.iter().fold(BigUint::one(), |acc, ni| acc * *ni);
+    let mut total = BigUint::zero();
+    for i in 0..3 {
+        let ni = n[i];
+        let n_i = &big_n / ni;
+        let m_i = modinv(&n_i, ni).expect("CRT cofactor must be invertible");
+        total += c[i] * &n_i * &m_i;
+    }
+    let x = total % &big_n;
+    // x = m^3 (as an integer, since m < min(n_i) => m^3 < N); take cbrt
+    icbrt(&x)
+}

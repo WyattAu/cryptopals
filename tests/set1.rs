@@ -544,3 +544,67 @@ fn ch32_noisy_timing_break_with_repeated_sampling() {
 fn leaky_count(expected: &[u8; 20], candidate: &[u8]) -> usize {
     candidate.iter().zip(expected).take_while(|(a, b)| a == b).count()
 }
+
+#[test]
+fn ch33_diffie_hellman_exchange() {
+    use cryptopals::{DhParty, modexp};
+    use num_bigint::BigUint;
+    // 128-bit safe prime (p = 2q+1, both Miller-Rabin + openssl verified)
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let a = DhParty::new(&g, &p, BigUint::from(1234567u64));
+    let b = DhParty::new(&g, &p, BigUint::from(7654321u64));
+    let ka = a.session_key(&b.public, &p);
+    let kb = b.session_key(&a.public, &p);
+    assert_eq!(ka, kb, "both parties must derive the same session key");
+    // the math: session key == g^(ab) mod p
+    let expect = modexp(&g, &(a.secret.clone() * &b.secret), &p);
+    assert_eq!(ka, expect);
+}
+
+#[test]
+fn ch39_rsa_roundtrip_and_signature() {
+    use cryptopals::RsaKey;
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"170360252569534844546703997316661685727", 10).unwrap();
+    let q = BigUint::parse_bytes(b"243523437065208141137053366952547832249", 10).unwrap();
+    let key = RsaKey::from_primes(&p, &q, &BigUint::from(65537u64));
+    // message as big-endian bytes ("try to break this" -> hex)
+    let m = BigUint::parse_bytes(b"74727920746f20627265616b2074686973", 16).unwrap();
+    let c = key.encrypt(&m);
+    assert_ne!(c, m, "ciphertext must differ from plaintext");
+    assert_eq!(key.decrypt(&c), m, "RSA decrypt must invert encrypt");
+    let sig = key.sign(&m);
+    assert!(key.verify(&m, &sig), "signature must verify");
+    let tampered = &sig - BigUint::from(1u32);
+    assert!(!key.verify(&m, &tampered), "tampered signature must fail");
+}
+
+#[test]
+fn ch40_hastad_broadcast_attack() {
+    use cryptopals::{RsaKey, hastad_broadcast_attack};
+    use num_bigint::BigUint;
+    let e = BigUint::from(3u64);
+    // six DISTINCT primes, all ≡ 2 mod 3 (e=3 requires 3 ∤ phi — a
+    // prime ≡ 1 mod 3 makes e non-invertible and the keygen rejects)
+    let primes = [
+        b"201308184236009972859622644976808679617",
+        b"246562181880310784098606962552255416867",
+        b"294710285999409720640270314814580782193",
+        b"302419647877271764597403108083572520847",
+        b"323850669002382669231191463677750223941",
+        b"337782083026302647462681937695373579353",
+    ]
+    .map(|s| BigUint::parse_bytes(s, 10).unwrap());
+    let keys: Vec<RsaKey> = (0..3)
+        .map(|i| RsaKey::from_primes(&primes[2 * i], &primes[2 * i + 1], &e))
+        .collect();
+    // same 16-byte secret to all three (no padding!) — m < 2^128 so m^3 < N
+    let m = BigUint::parse_bytes(b"736563726574206d657373616765", 16).unwrap();
+    let c: Vec<BigUint> = keys.iter().map(|k| k.encrypt(&m)).collect();
+    let rec = hastad_broadcast_attack(
+        [&c[0], &c[1], &c[2]],
+        [&keys[0].n, &keys[1].n, &keys[2].n],
+    );
+    assert_eq!(rec, m, "Håstad's broadcast attack must recover the message");
+}
