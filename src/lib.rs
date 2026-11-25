@@ -466,3 +466,21 @@ pub fn padding_oracle_attack(ct: &[u8]) -> Vec<u8> {
     }
     plain
 }
+
+// ---- Set 3 ch18: CTR mode (AES-128, LE nonce || LE counter) ----
+
+/// AES-128-CTR. Keystream block i = ECB(nonce_le || i_le); XOR with the
+/// data. Encryption and decryption are the same operation.
+pub fn ctr128(key: &[u8; 16], nonce: u64, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for (i, chunk) in data.chunks(16).enumerate() {
+        let mut block = [0u8; 16];
+        block[..8].copy_from_slice(&nonce.to_le_bytes());
+        block[8..].copy_from_slice(&(i as u64).to_le_bytes());
+        let ks = aes::aes128_ecb_encrypt_block(&block, key);
+        for (j, &b) in chunk.iter().enumerate() {
+            out.push(b ^ ks[j]);
+        }
+    }
+    out
+}

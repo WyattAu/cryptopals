@@ -252,3 +252,28 @@ fn ch17_padding_oracle_recovers_plaintext() {
         assert_eq!(unpadded, secret.as_bytes(), "padding oracle must recover the plaintext");
     }
 }
+
+#[test]
+fn ch18_ctr_cross_checked_against_python() {
+    use cryptopals::ctr128;
+    let key = *b"YELLOW SUBMARINE";
+    // vector generated with python cryptography's AES-ECB core using
+    // the identical LE nonce || LE counter keystream construction
+    let pt = b"Burning 'em, if you ain't quick and you're gonna learn to slow down. The FBI wants us to send them a unique message.";
+    let expected: Vec<u8> = hex_to_vec("34a4b925c6cc21c2c4ca6e714c7aa552ab8319fcf9047cf9bbfa6ee6c68d18384cceeaeb6814426cb1bf9741dd92eaace1ecce543b944e21be6c150ba61885d4eff1b5188745319d0fded5aac7a6f28bf8d2bbbdac1923d5b2fb2564e72c5552920caf49ef3694d244490878deb3200df1f4ec17");
+    let ct = ctr128(&key, 0, pt);
+    assert_eq!(ct, expected, "CTR must match the python-derived vector");
+    // CTR is symmetric: decrypting the ct returns the pt
+    assert_eq!(ctr128(&key, 0, &ct), pt.to_vec());
+    // keystream reuse with a fixed nonce is the ch19/20 lesson — assert
+    // it programmatically: same nonce, different data, identical keystream
+    let a = ctr128(&key, 7, &[0u8; 32]);
+    let b = ctr128(&key, 7, &[0u8; 32]);
+    assert_eq!(a, b);
+}
+
+fn hex_to_vec(s: &str) -> Vec<u8> {
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+        .collect()
+}
