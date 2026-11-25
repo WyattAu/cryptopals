@@ -182,3 +182,56 @@ pub fn aes128_ecb_decrypt(ct: &[u8], key: &[u8; 16]) -> Vec<u8> {
     }
     out
 }
+
+fn sub_bytes_fwd(state: &mut [u8; 16]) {
+    for b in state.iter_mut() {
+        *b = SBOX[*b as usize];
+    }
+}
+
+fn shift_rows_fwd(s: &mut [u8; 16]) {
+    for r in 1..4usize {
+        let row: Vec<u8> = (0..4).map(|c| s[c * 4 + r]).collect();
+        for c in 0..4 {
+            s[c * 4 + r] = row[(c + r) % 4];
+        }
+    }
+}
+
+fn mix_columns_fwd(state: &mut [u8; 16]) {
+    for c in 0..4 {
+        let col = [state[c * 4], state[c * 4 + 1], state[c * 4 + 2], state[c * 4 + 3]];
+        state[c * 4] = gmul(col[0], 2) ^ gmul(col[1], 3) ^ col[2] ^ col[3];
+        state[c * 4 + 1] = col[0] ^ gmul(col[1], 2) ^ gmul(col[2], 3) ^ col[3];
+        state[c * 4 + 2] = col[0] ^ col[1] ^ gmul(col[2], 2) ^ gmul(col[3], 3);
+        state[c * 4 + 3] = gmul(col[0], 3) ^ col[1] ^ col[2] ^ gmul(col[3], 2);
+    }
+}
+
+/// AES-128 ECB encrypt of one 16-byte block.
+pub fn aes128_ecb_encrypt_block(block: &[u8; 16], key: &[u8; 16]) -> [u8; 16] {
+    let rk = expand_key(key);
+    let mut st = *block;
+    add_round_key(&mut st, &rk, 0);
+    for round in 1..10 {
+        sub_bytes_fwd(&mut st);
+        shift_rows_fwd(&mut st);
+        mix_columns_fwd(&mut st);
+        add_round_key(&mut st, &rk, round);
+    }
+    sub_bytes_fwd(&mut st);
+    shift_rows_fwd(&mut st);
+    add_round_key(&mut st, &rk, 10);
+    st
+}
+
+/// AES-128 ECB encrypt (len must be a multiple of 16).
+pub fn aes128_ecb_encrypt(pt: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    assert!(pt.len() % 16 == 0);
+    let mut out = Vec::with_capacity(pt.len());
+    for block in pt.chunks_exact(16) {
+        let b: [u8; 16] = block.try_into().unwrap();
+        out.extend_from_slice(&aes128_ecb_encrypt_block(&b, key));
+    }
+    out
+}
