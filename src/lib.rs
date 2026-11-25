@@ -1,72 +1,18 @@
 //! Cryptopals Set 1 — Basics. Solutions in pure Rust, std only.
 
-pub mod aes;
-pub mod sha1;
+// primitives promoted to the crypto-primitives estate crate —
+// re-exported here so challenge code and tests keep their paths
+pub use crypto_primitives::aes;
+pub use crypto_primitives::sha1;
+pub use crypto_primitives::hex::{hex_decode, hex_encode};
+pub use crypto_primitives::base64::{base64_encode, base64_decode};
+pub use crypto_primitives::xor::xor;
+pub use crypto_primitives::padding::{pkcs7_pad, pkcs7_unpad};
 
-pub fn hex_decode(s: &str) -> Vec<u8> {
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
-        .collect()
-}
 
-pub fn hex_encode(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
 
-pub fn base64_encode(b: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for c in b.chunks(3) {
-        let b0 = c[0] as u32;
-        let b1 = *c.get(1).unwrap_or(&0) as u32;
-        let b2 = *c.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
 
-pub fn base64_decode(s: &str) -> Vec<u8> {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let val = |c: u8| -> Option<u32> {
-        T.iter().position(|&t| t == c).map(|p| p as u32)
-            .or_else(|| match c { b'=' => None, _ => {
-                // url-safe alphabet tolerated
-                match c { b'-' => Some(62), b'_' => Some(63), _ => None }
-            }})
-    };
-    let mut out = Vec::new();
-    let clean: Vec<u8> = s.bytes().filter(|b| *b != b'\n' && *b != b'\r').collect();
-    for c in clean.chunks(4) {
-        let mut n = 0u32;
-        let mut pad = 0usize;
-        for (i, &ch) in c.iter().enumerate() {
-            match val(ch) {
-                Some(v) => n |= v << (18 - 6 * i),
-                None => pad += 1,
-            }
-        }
-        if c.len() < 2 {
-            break;
-        }
-        out.push((n >> 16) as u8);
-        if c.len() > 2 {
-            out.push((n >> 8) as u8);
-        }
-        if c.len() > 3 {
-            out.push(n as u8);
-        }
-        let _ = pad;
-    }
-    out
-}
 
-pub fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    a.iter().zip(b).map(|(x, y)| x ^ y).collect()
-}
 
 /// Single-byte XOR: score by English letter frequency, return best key.
 pub fn single_byte_xor_best(cipher: &[u8]) -> (u8, f64, Vec<u8>) {
@@ -186,23 +132,7 @@ pub fn detect_ecb(data: &[u8]) -> Vec<usize> {
 
 // ---- Set 2 ch9: PKCS#7 padding ----
 
-pub fn pkcs7_pad(data: &[u8], block: usize) -> Vec<u8> {
-    let pad = (block - data.len() % block) as u8;
-    let mut out = data.to_vec();
-    out.extend(std::iter::repeat(pad).take(pad as usize));
-    out
-}
 
-pub fn pkcs7_unpad(data: &[u8], block: usize) -> Option<&[u8]> {
-    let pad = *data.last()?;
-    if pad == 0 || pad as usize > block || pad as usize > data.len() {
-        return None;
-    }
-    if data[data.len() - pad as usize..].iter().any(|&b| b != pad) {
-        return None;
-    }
-    Some(&data[..data.len() - pad as usize])
-}
 
 // ---- Set 2 ch12: the ECB oracle + byte-at-a-time attack ----
 

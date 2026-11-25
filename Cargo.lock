@@ -3,5 +3,13 @@
 version = 4
 
 [[package]]
+name = "crypto-primitives"
+version = "0.1.0"
+source = "git+https://github.com/WyattAu/crypto-primitives?rev=9b693cbbee0a06ae7a2588c3124f606da1d86093#9b693cbbee0a06ae7a2588c3124f606da1d86093"
+
+[[package]]
 name = "cryptopals"
 version = "0.1.0"
+dependencies = [
+ "crypto-primitives",
+]
