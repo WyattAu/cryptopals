@@ -273,7 +273,7 @@ pub fn craft_admin_block() -> [u8; 16] {
     // The standard: email = 10 'a's => "email=aaaaaaaaaa" fills block 1;
     // block 2 = "admin" + 11 PKCS#7 pad bytes (0x0b).
     let _ = email;
-    let mut probe = "aaaaaaaaaa".to_string(); // exactly 10 chars
+    let probe = "aaaaaaaaaa".to_string(); // exactly 10 chars
     let _ = probe;
     let email_clean = "aaaaaaaaaa";
     let enc = profile_for(email_clean);
