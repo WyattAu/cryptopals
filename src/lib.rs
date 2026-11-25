@@ -633,3 +633,26 @@ pub fn clone_mt19937(outputs: &[u32; 624]) -> Mt19937 {
     }
     Mt19937 { mt, idx: 624 }
 }
+
+// ---- Set 4 ch24: MT19937 stream cipher + 16-bit seed brute-force ----
+
+/// MT19937 keystream cipher: the low 8 bits of each successive output
+/// XOR the data, keystream seeded by a 16-bit secret. Encrypt ==
+/// decrypt. The 16-bit seed is the whole security — and it is none.
+pub fn mt_stream(key_seed: u16, data: &[u8]) -> Vec<u8> {
+    let mut mt = Mt19937::new(key_seed as u32);
+    data.iter().map(|&b| b ^ (mt.next_u32() & 0xff) as u8).collect()
+}
+
+/// The break: with a known plaintext prefix, brute-force all 65536
+/// 16-bit seeds — the candidate whose keystream matches the prefix IS
+/// the key, and then the entire message decrypts.
+pub fn break_mt_stream(ct: &[u8], known_prefix: &[u8]) -> Option<Vec<u8>> {
+    for seed in 0..=u16::MAX {
+        let ks = mt_stream(seed, &ct[..known_prefix.len().min(ct.len())]);
+        if ks[..known_prefix.len()] == *known_prefix {
+            return Some(mt_stream(seed, ct));
+        }
+    }
+    None
+}

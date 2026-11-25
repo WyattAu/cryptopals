@@ -385,3 +385,14 @@ fn ch23_clone_reproduces_the_stream() {
         );
     }
 }
+
+#[test]
+fn ch24_mt_stream_bruteforced_via_known_prefix() {
+    use cryptopals::{break_mt_stream, mt_stream};
+    let secret = b"the 16-bit MT seed falls to 65536 trials with a known prefix";
+    let key: u16 = 0x5eed; // stand-in for crypto-random 16 bits
+    let known = b"the 16-bit MT s"; // attacker-known prefix (e.g. cookie header)
+    let ct = mt_stream(key, secret);
+    let recovered = break_mt_stream(&ct, known).expect("brute force must find the seed");
+    assert_eq!(recovered, secret.to_vec(), "recovered plaintext must match");
+}
