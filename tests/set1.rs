@@ -739,3 +739,60 @@ fn ch41_rsa_parity_oracle_binary_search() {
     }
     assert_eq!(rsa_unpad(&padded_bytes).as_deref(), Some(b"parity oracle wins".as_slice()));
 }
+
+#[test]
+fn ch42_bleichenbacher_e3_signature_forgery() {
+    use cryptopals::{bleichenbacher_block, bleichenbacher_e3_forge, modexp, sha1};
+    use num_bigint::BigUint;
+    // 1024-bit keypair, primes ≡ 2 mod 3 (verified via Miller-Rabin +
+    // openssl during generation)
+    let p = BigUint::parse_bytes(b"8625698395464462221575041633586539666232035565817028295604560474507861179606399120992672215609858184184353041569730267889886433931512069799347723332849689", 10).unwrap();
+    let q = BigUint::parse_bytes(b"12856246090808524547580715254204892739362592576157476558444732478765743015354192603475763296420018036189163034134797992874669081423510382450389907165561457", 10).unwrap();
+    let e = BigUint::from(3u64);
+    let n = &p * &q; // public modulus — the attacker needs only this
+
+    let message = b"hi, i'm definitely the legit signer";
+    let digest = sha1::sha1(message);
+
+    // NAIVE verifier: computes sig^3 mod n and accepts if the bytes
+    // begin 00 01 FF..FF 00 <digest> — no garbage validation
+    let naive_verify = |sig: &BigUint| -> bool {
+        let cube = modexp(sig, &e, &n);
+        let mut b = cube.to_bytes_be();
+        while b.len() < 128 {
+            b.insert(0, 0); // to_bytes_be drops the leading 0x00 header
+        }
+        if b.len() != 128 || b[0] != 0x00 || b[1] != 0x01 || b[2] != 0xff {
+            return false;
+        }
+        let mut i = 2;
+        while i < b.len() && b[i] == 0xff {
+            i += 1;
+        }
+        if i >= b.len() || b[i] != 0x00 {
+            return false;
+        }
+        &b[i + 1..i + 1 + 20] == &digest[..]
+    };
+
+    // the forged signature (no private key involved)
+    let sigma = bleichenbacher_e3_forge(8, &digest, 128);
+    let cube = modexp(&sigma, &e, &n);
+    assert!(cube < n, "sigma^3 must not wrap — the cube IS the padded block");
+    let cube_bytes = cube.to_bytes_be();
+    // the checked bytes must match the ideal block exactly
+    let ideal = bleichenbacher_block(8, &digest, 128);
+    let mut padded = cube_bytes.clone();
+    while padded.len() < 128 {
+        padded.insert(0, 0);
+    }
+    for i in 0..(2 + 8 + 1 + 20) {
+        assert_eq!(padded[i], ideal[i], "checked region must be byte-exact at {i}");
+    }
+    // garbage region may differ — that's the attack
+    assert!(
+        padded[31..] != ideal[31..] || true,
+        "garbage divergence is allowed"
+    );
+    assert!(naive_verify(&sigma), "the naive verifier must accept the forgery");
+}

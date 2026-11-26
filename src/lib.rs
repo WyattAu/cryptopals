@@ -1279,3 +1279,27 @@ pub fn parity_oracle_attack(
     assert!(&m * &scale >= lo_bound && &m * &scale < hi_bound, "recovered m must sit in the j-window");
     m
 }
+
+// ---- Set 6 ch42: Bleichenbacher's e=3 signature forgery ----
+
+/// Builds the PKCS#1-style block a naive e=3 verifier expects:
+/// 0x00 0x01 FF..FF 0x00 || digest || garbage.
+pub fn bleichenbacher_block(ff_bytes: usize, digest: &[u8], total_len: usize) -> Vec<u8> {
+    let mut b = vec![0x00u8, 0x01];
+    b.extend(std::iter::repeat(0xffu8).take(ff_bytes));
+    b.push(0x00);
+    b.extend(digest);
+    b.resize(total_len, 0x00); // garbage region (zeros in the target)
+    b
+}
+
+/// The forgery: pick sigma = icbrt(D) + 1 where D is the ideal block
+/// with zeroed garbage. Then D <= sigma^3 < D + 3*sigma^2 + ... — the
+/// difference stays inside the garbage region, so every byte the naive
+/// verifier checks (header, digest) is intact. No key, no root-finding
+/// beyond one cube root.
+pub fn bleichenbacher_e3_forge(ff_bytes: usize, digest: &[u8], total_len: usize) -> BigUint {
+    let block = bleichenbacher_block(ff_bytes, digest, total_len);
+    let d = BigUint::from_bytes_be(&block);
+    icbrt(&d) + BigUint::one()
+}
