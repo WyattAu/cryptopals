@@ -427,7 +427,7 @@ pub fn padding_oracle_attack(ct: &[u8]) -> Vec<u8> {
         let mut dec_known = [0u8; 16];
         for pos in (0..16).rev() {
             let pad_len = 16 - pos;
-            let mut found = None;
+            let found;
             for g in 0..=255u8 {
                 let mut craft = orig_prev;
                 // the oracle decrypts pt_target = dec ^ craft, so to make
@@ -1467,4 +1467,172 @@ pub fn hybrid_cca_recover_session(
         m1[i] = d[i] ^ p2_known[i];
     }
     Some(m1)
+}
+
+// ---- Set 6 ch47-48: Bleichenbacher's padding oracle (full CCA) ----
+
+fn ceil_div(x: &BigUint, y: &BigUint) -> BigUint {
+    (x + y - BigUint::one()) / y
+}
+
+/// PKCS#1 v1.5 type-2 conformance: 0x00 0x02, >= 8 nonzero bytes, a
+/// zero separator. (The site's simplification checks only the first
+/// two bytes; the full check is what a real oracle does.)
+fn is_pkcs1_type2(m: &[u8]) -> bool {
+    m.len() >= 11
+        && m[0] == 0x00
+        && m[1] == 0x02
+        && m[2..10].iter().all(|&b| b != 0)
+        && m[10..].iter().any(|&b| b == 0)
+}
+
+/// The oracle: decrypts and reveals ONLY whether the plaintext is
+/// PKCS#1 type-2 conformant.
+pub fn bleichenbacher_oracle(ct: &BigUint, key: &RsaKey) -> bool {
+    let kb = ((key.n.bits() + 7) / 8) as usize;
+    let mb = key.decrypt(ct).to_bytes_be();
+    let mut buf = vec![0u8; kb - mb.len()];
+    buf.extend(mb);
+    is_pkcs1_type2(&buf)
+}
+
+fn merge_intervals(mut v: Vec<(BigUint, BigUint)>) -> Vec<(BigUint, BigUint)> {
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<(BigUint, BigUint)> = Vec::new();
+    for (lo, hi) in v {
+        let merged = match out.last() {
+            Some(last) => lo <= &last.1 + &BigUint::one(),
+            None => false,
+        };
+        if merged {
+            let last = out.last_mut().unwrap();
+            if hi > last.1 {
+                last.1 = hi;
+            }
+        } else {
+            out.push((lo, hi));
+        }
+    }
+    out
+}
+
+/// The full adaptive chosen-ciphertext attack (Vaudenay-style
+/// rendering of Bleichenbacher 1998). Recovers the padded plaintext
+/// from nothing but the conformance oracle, e, and n.
+pub fn bleichenbacher_attack(
+    ct: &BigUint,
+    e: &BigUint,
+    n: &BigUint,
+    oracle: &dyn Fn(&BigUint) -> bool,
+) -> BigUint {
+    let kbytes = ((n.bits() + 7) / 8) as usize;
+    let b = BigUint::from(2u32).pow(8 * (kbytes as u32 - 2));
+    let b2 = &b * BigUint::from(2u32);
+    let b3 = &b * BigUint::from(3u32);
+    let b31 = &b3 - BigUint::one();
+    let zero = BigUint::zero();
+    let one = BigUint::one();
+
+    // M0 = [2B, 3B-1]
+    let mut intervals = vec![(b2.clone(), b31.clone())];
+    // s1: smallest s >= n/3B with conforming(ct * s^e mod n)
+    let mut s = ceil_div(n, &b3);
+    let mut c_cur;
+    loop {
+        c_cur = ct * modexp(&s, e, n) % n;
+        if oracle(&c_cur) {
+            break;
+        }
+        s += one.clone();
+    }
+    // interval update given s and previous intervals
+    let update = |intervals: &[(BigUint, BigUint)], s: &BigUint| -> Vec<(BigUint, BigUint)> {
+        let mut collected = Vec::new();
+        for (a, b) in intervals {
+            let asv = a * s;
+            let bsv = b * s;
+            // r >= (a*s - 3B + 1)/n  (>=0), r <= (b*s - 2B)/n
+            let r_lo = if &asv + &one <= b3 {
+                zero.clone()
+            } else {
+                ceil_div(&(&asv + &one - &b3), n)
+            };
+            if bsv < b2 {
+                continue;
+            }
+            let r_hi = (&bsv - &b2) / n;
+            if r_hi < r_lo {
+                continue;
+            }
+            let mut r = r_lo;
+            while r <= r_hi {
+                let rn = &r * n;
+                let lo = {
+                    let cand = ceil_div(&(&b2 + &rn), s);
+                    std::cmp::max(a.clone(), cand)
+                };
+                let hi = {
+                    let cand = (&b31 + &rn) / s;
+                    std::cmp::min(b.clone(), cand)
+                };
+                if lo <= hi {
+                    collected.push((lo, hi));
+                }
+                r += one.clone();
+            }
+        }
+        merge_intervals(collected)
+    };
+
+    intervals = update(&intervals, &s);
+    let mut iters = 0usize;
+    loop {
+        iters += 1;
+        assert!(iters < 512, "bleichenbacher: search did not terminate");
+        if intervals.len() == 1 {
+            let (a, b) = intervals[0].clone();
+            if a == b {
+                // m = a exactly — verify by re-encryption
+                let m = a;
+                assert!(
+                    modexp(&m, e, n) == *ct,
+                    "bleichenbacher: recovered m must re-encrypt to ct"
+                );
+                return m;
+            }
+            // single interval: targeted r/s search —
+            // r starts at ceil(2(b·s_prev - 2B)/n)
+            let mut r = ceil_div(&((&b * &s - &b2) * &two()), n);
+            let found;
+            'outer: loop {
+                let s_lo = ceil_div(&(&b2 + &r * n), &b);
+                let s_hi = (&b31 + &r * n) / &a;
+                let mut cand = s_lo;
+                while cand <= s_hi {
+                    let c_try = ct * modexp(&cand, e, n) % n;
+                    if oracle(&c_try) {
+                        found = Some(cand);
+                        break 'outer;
+                    }
+                    cand += one.clone();
+                }
+                r += one.clone();
+            }
+            s = found;
+        } else {
+            // multiple intervals: scan upward from s + 1
+            loop {
+                s += one.clone();
+                let c_try = ct * modexp(&s, e, n) % n;
+                if oracle(&c_try) {
+                    break;
+                }
+            }
+        }
+        intervals = update(&intervals, &s);
+    }
+}
+
+fn two() -> BigUint {
+    BigUint::from(2u32)
 }

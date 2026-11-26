@@ -885,3 +885,26 @@ fn ch46_hybrid_cca_recovers_session_key() {
         .expect("CCA must succeed");
     assert_eq!(recovered, session_key, "session key recovered without the RSA key");
 }
+
+#[test]
+fn ch47_ch48_bleichenbacher_full_cca() {
+    use cryptopals::{RsaKey, bleichenbacher_attack, bleichenbacher_oracle, rsa_pad};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"201308184236009972859622644976808679617", 10).unwrap();
+    let q = BigUint::parse_bytes(b"246562181880310784098606962552255416867", 10).unwrap();
+    let key = RsaKey::from_primes(&p, &q, &BigUint::from(65537u64));
+    // a conforming (type-2 padded) message under the 256-bit modulus
+    let padded = rsa_pad(b"bleich", 32);
+    let m = BigUint::from_bytes_be(&padded);
+    let ct = key.encrypt(&m);
+    let oracle = |c: &BigUint| bleichenbacher_oracle(c, &key);
+    let recovered = bleichenbacher_attack(&ct, &key.e, &key.n, &oracle);
+    assert_eq!(recovered, m, "Bleichenbacher CCA must recover the padded plaintext");
+    // the internal assert already re-verified encryption; also unpad
+    use cryptopals::rsa_unpad;
+    let mut b = recovered.to_bytes_be();
+    while b.len() < 32 {
+        b.insert(0, 0);
+    }
+    assert_eq!(rsa_unpad(&b).as_deref(), Some(b"bleich".as_slice()));
+}
