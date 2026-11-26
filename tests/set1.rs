@@ -1009,3 +1009,29 @@ fn ch53_joux_expandable_second_preimage() {
     assert_eq!(toy_md16(IV, &second), toy_md16(IV, &victim), "second preimage must hash identically");
     assert!(second.len() < victim.len(), "second preimage must be SHORTER ({} < {})", second.len(), victim.len());
 }
+
+#[test]
+fn ch57_pollard_p1_factors_smooth_prime() {
+    use cryptopals::pollard_p1;
+    use num_bigint::BigUint;
+    // p = 77189112001 with p-1 = 2^6·3^4·5^3·7^2·11·13·17 — B=20 smooth
+    let p = BigUint::parse_bytes(b"77189112001", 10).unwrap();
+    let q = BigUint::parse_bytes(b"246562181880310784098606962552255416867", 10).unwrap();
+    let n = &p * &q;
+    let f = pollard_p1(&n, 20).expect("p-1 is 20-smooth: must factor");
+    assert!(&n % &f == BigUint::from(0u32), "found factor must divide n");
+    assert_ne!(f, BigUint::from(1u32));
+    assert_ne!(f, n);
+    assert_eq!(&f * (&n / &f), n, "the two factors must reconstruct n");
+}
+
+#[test]
+fn ch58_pollard_rho_finds_small_factor() {
+    use cryptopals::pollard_rho;
+    use num_bigint::BigUint;
+    let n = BigUint::parse_bytes(b"625492079071772343982349279792921887", 10).unwrap();
+    let small = BigUint::parse_bytes(b"13163671", 10).unwrap();
+    let f = pollard_rho(&n).expect("rho must find the 24-bit factor quickly");
+    assert!(f == small || f == &n / &small, "rho must surface one of the two factors");
+    assert_eq!(&f * (&n / &f), n);
+}

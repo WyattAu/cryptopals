@@ -1915,3 +1915,65 @@ pub fn second_preimage16(state0: u16, victim: &[u16], k: usize) -> Option<Vec<u1
     }
     None
 }
+
+// ---- Set 8: the ladder — factoring (Pollard p-1, rho) ----
+
+/// Pollard's p-1: if some prime factor p of n has p-1 B-smooth, then
+/// a = 2^(B!) mod n ≡ 1 (mod p) but (usually) not mod n — so
+/// gcd(a-1, n) reveals p. The ch57 attack against under-generated RSA
+/// primes.
+pub fn pollard_p1(n: &BigUint, bound: u64) -> Option<BigUint> {
+    let one = BigUint::one();
+    let mut a = BigUint::from(2u32);
+    for j in 2u64..=bound {
+        a = a.modpow(&BigUint::from(j), n);
+        // periodic gcd check keeps factors recoverable before overflow
+        if j % 8 == 0 || j == bound {
+            let g = {
+                let minus = (&a + n - &one) % n;
+                gcd(&minus, n)
+            };
+            if g != one && g != *n {
+                return Some(g);
+            }
+        }
+    }
+    None
+}
+
+fn gcd(a: &BigUint, b: &BigUint) -> BigUint {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    while !b.is_zero() {
+        let r = &a % &b;
+        a = std::mem::replace(&mut b, r);
+    }
+    a
+}
+
+/// Pollard's rho (Floyd cycle detection): x_{i+1} = x_i² + c mod n;
+/// gcd(|x_i - x_{2i}|, n) is a nontrivial factor once the sequence
+/// cycles modulo a small prime factor but not modulo n.
+pub fn pollard_rho(n: &BigUint) -> Option<BigUint> {
+    if n % BigUint::from(2u32) == BigUint::zero() {
+        return Some(BigUint::from(2u32));
+    }
+    let one = BigUint::one();
+    for c in 1u32..32 {
+        let c_const = BigUint::from(c);
+        let mut x = BigUint::from(2u32);
+        let mut y = BigUint::from(2u32);
+        let mut d = one.clone();
+        while d == one {
+            x = (&x * &x + &c_const) % n;
+            y = (&y * &y + &c_const) % n;
+            y = (&y * &y + &c_const) % n;
+            let diff = if x > y { &x - &y } else { &y - &x };
+            d = gcd(&diff, n);
+        }
+        if d != *n {
+            return Some(d);
+        }
+        // degenerate cycle for this c — try the next
+    }
+    None
+}
