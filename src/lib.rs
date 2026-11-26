@@ -1708,3 +1708,59 @@ pub fn toy_md_colliding_suffix(state: u32) -> (u32, u32, u32) {
         assert!(x != 0, "toy collision search exhausted 2^32 (impossible)");
     }
 }
+
+// ---- Set 7 ch50: collision-based MAC forgery ----
+
+/// Birthday search for a colliding pair whose blocks differ in the low
+/// nibble (standing in for "different transfer amounts") — in the real
+/// challenge this pair is precomputed research data handed to the
+/// attacker.
+pub fn toy_md_amount_pair(state: u32) -> (u32, u32) {
+    use std::collections::HashMap;
+    let mut seen: HashMap<u32, u32> = HashMap::new();
+    let mut x = 0u32;
+    loop {
+        let out = toy_md_hash(state, &[x]);
+        if let Some(&prev) = seen.get(&out) {
+            if (prev & 0xf) != (x & 0xf) {
+                return (prev, x);
+            }
+        } else {
+            seen.insert(out, x);
+        }
+        x = x.wrapping_add(1);
+        assert!(x != 0, "toy amount-pair search exhausted 2^32");
+    }
+}
+
+/// The forgery: two orders sharing the known header but differing in
+/// the colliding suffix blocks carry IDENTICAL MACs under the secret
+/// key — the bank's "tag binds content" assumption fails.
+pub fn collision_mac_orders_equal(secret_state: u32, header: u32, a: u32, b: u32) -> bool {
+    toy_md_hash(secret_state, &[header, a]) == toy_md_hash(secret_state, &[header, b])
+}
+
+// ---- Set 7 ch51: CBC-MAC with IV = first message block ----
+
+/// A documented-broken construction: the first block doubles as the
+/// IV, the MAC chains over the remainder. One-block messages reduce to
+/// AES(0) — a UNIVERSAL tag.
+pub fn cbc_mac_iv_inheritance(key: &[u8; 16], msg: &[u8]) -> [u8; 16] {
+    assert!(msg.len() % 16 == 0 && !msg.is_empty());
+    let iv: [u8; 16] = msg[..16].try_into().unwrap();
+    if msg.len() == 16 {
+        // IV cancels the block: AES(0)
+        return crypto_primitives::aes::aes128_ecb_encrypt_block(&[0u8; 16], key);
+    }
+    let mut prev = iv;
+    let mut tag = [0u8; 16];
+    for block in msg[16..].chunks_exact(16) {
+        let mut x = [0u8; 16];
+        for j in 0..16 {
+            x[j] = block[j] ^ prev[j];
+        }
+        tag = crypto_primitives::aes::aes128_ecb_encrypt_block(&x, key);
+        prev = tag;
+    }
+    tag
+}

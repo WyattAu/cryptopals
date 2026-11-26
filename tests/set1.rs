@@ -949,3 +949,32 @@ fn ch52_toy_md_suffix_collision_and_extension() {
         "collision found at the prefix's end state must apply under it"
     );
 }
+
+#[test]
+fn ch50_collision_mac_forges_orders() {
+    use cryptopals::{collision_mac_orders_equal, toy_md_amount_pair};
+    let secret_state = 0x5EED_1234u32; // the bank's secret seeding
+    let header = 0xCAFE_BABEu32; // known protocol header
+    // the "provided research data": a colliding pair with different amounts
+    let (a, b) = toy_md_amount_pair(toy_md_hash_public(secret_state, header));
+    assert_ne!(a & 0xf, b & 0xf, "the pair must encode different amounts");
+    // both orders verify to the same MAC despite different payloads
+    assert!(collision_mac_orders_equal(secret_state, header, a, b));
+}
+
+fn toy_md_hash_public(secret_state: u32, header: u32) -> u32 {
+    cryptopals::toy_md_hash(secret_state, &[header])
+}
+
+#[test]
+fn ch51_iv_inheritance_universal_one_block_tag() {
+    use cryptopals::cbc_mac_iv_inheritance;
+    let key = *b"ch51 broken key!";
+    // EVERY one-block message tags to AES(0)
+    let t1 = cbc_mac_iv_inheritance(&key, b"from=me&to=you&5");
+    let t2 = cbc_mac_iv_inheritance(&key, b"from=you&to=me&9");
+    assert_eq!(t1, t2, "all one-block tags must collapse to AES(0)");
+    // the forger needs no key: tag(AES(0)) is known once ANY tag is seen
+    let forged = b"from=att&to=me&9"; // 16 bytes
+    assert_eq!(cbc_mac_iv_inheritance(&key, forged), t1, "universal tag accepts the forged transfer");
+}
