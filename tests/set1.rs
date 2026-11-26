@@ -1109,3 +1109,37 @@ fn ch61_ecdsa_nonce_reuse_recovers_private_key() {
     assert_eq!(recovered, x_true, "recovered x must equal the true key");
 }
 
+
+#[test]
+fn ch63_subgroup_confinement_order2() {
+    use cryptopals::subgroup_confinement_order2;
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    // even exponent -> key 1; odd exponent -> key p-1; both trivial
+    let k_even = subgroup_confinement_order2(&p, &BigUint::from(1000u64));
+    assert_eq!(k_even, BigUint::from(1u32));
+    let k_odd = subgroup_confinement_order2(&p, &BigUint::from(1001u64));
+    assert_eq!(k_odd, &p - BigUint::from(1u32));
+}
+
+#[test]
+fn ch64_subgroup_confinement_enumerated() {
+    use cryptopals::subgroup_confinement_small;
+    use num_bigint::BigUint;
+    // p with (p-1) divisible by 5: our safe prime has p-1 = 2q, so use
+    // a constructed prime p = 1 + 5·m (Miller-Rabin verified)
+    let p = BigUint::parse_bytes(b"7919", 10).unwrap(); // 7919 is prime; 7918 = 2·37·107 — no factor 5
+    let _ = p;
+    // use the safe prime's structure differently: confinement demo on
+    // ANY prime: take the safe prime p, subgroup order 2 already done;
+    // here use p' = 2q+1 with q ≡ 0 mod 5? simplest: p = 31 (prime),
+    // p-1 = 30 = 5·6
+    let p31 = BigUint::from(31u32);
+    let (key, possible) = subgroup_confinement_small(&p31, &BigUint::from(1234u64), 5);
+    assert!(possible.len() <= 5, "the subgroup must hold at most 5 values");
+    assert!(possible.contains(&key), "the victim key must be enumerable");
+    // and the attacker's enumeration is exactly the subgroup
+    let mut distinct: std::collections::HashSet<BigUint> = possible.into_iter().collect();
+    distinct.insert(BigUint::from(1u32));
+    assert!(distinct.len() <= 6);
+}
