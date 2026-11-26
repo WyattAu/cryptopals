@@ -908,3 +908,44 @@ fn ch47_ch48_bleichenbacher_full_cca() {
     }
     assert_eq!(rsa_unpad(&b).as_deref(), Some(b"bleich".as_slice()));
 }
+
+#[test]
+fn ch49_cbc_mac_variable_length_forgery() {
+    use cryptopals::{cbc_mac, cbc_mac_forgery};
+    let key = *b"ch49 bank key!!!";
+    let iv = [0u8; 16]; // the vulnerable fixed IV
+    // victim: one-block transfer "from&to&amount" padded conceptually
+    let victim_p2 = *b"from=me&to=you&5";
+    // attacker's prefix: any block they can get a tag for
+    let prefix_p1 = *b"prefix=attackblk";
+    let (t2, forged) = cbc_mac_forgery(&key, &iv, &prefix_p1, &victim_p2);
+    // the forged two-block message carries the victim's tag exactly
+    assert_eq!(cbc_mac(&key, &iv, &forged), t2, "forgery must match the victim tag");
+}
+
+#[test]
+fn ch52_toy_md_suffix_collision_and_extension() {
+    use cryptopals::{toy_md_colliding_suffix, toy_md_hash};
+    // collision for state 0 (empty prefix)
+    let (a, b, out) = toy_md_colliding_suffix(0);
+    assert_ne!(a, b);
+    assert_eq!(toy_md_hash(0, &[a]), toy_md_hash(0, &[b]));
+    assert_eq!(out, toy_md_hash(0, &[b]));
+    // the TRUE reusable Merkle-Damgård property: any common suffix
+    // preserves the collision — hash(P||a||X) == hash(P||b||X) for
+    // every X, because both messages absorb identical state after the
+    // colliding suffix
+    for x in [1u32, 0xdead_beef, 0x7fff_ffff] {
+        assert_eq!(toy_md_hash(0, &[a, x]), toy_md_hash(0, &[b, x]));
+    }
+    // collisions are STATE-specific: for a nonzero prefix, the
+    // attacker birthday-searches a NEW pair at that prefix's end state
+    let prefix = 0xdead_beefu32;
+    let s = toy_md_hash(0, &[prefix]);
+    let (a2, b2, _) = toy_md_colliding_suffix(s);
+    assert_eq!(
+        toy_md_hash(0, &[prefix, a2]),
+        toy_md_hash(0, &[prefix, b2]),
+        "collision found at the prefix's end state must apply under it"
+    );
+}

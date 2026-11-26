@@ -427,7 +427,7 @@ pub fn padding_oracle_attack(ct: &[u8]) -> Vec<u8> {
         let mut dec_known = [0u8; 16];
         for pos in (0..16).rev() {
             let pad_len = 16 - pos;
-            let found;
+            let mut found = None;
             for g in 0..=255u8 {
                 let mut craft = orig_prev;
                 // the oracle decrypts pt_target = dec ^ craft, so to make
@@ -1603,22 +1603,20 @@ pub fn bleichenbacher_attack(
             // single interval: targeted r/s search —
             // r starts at ceil(2(b·s_prev - 2B)/n)
             let mut r = ceil_div(&((&b * &s - &b2) * &two()), n);
-            let found;
-            'outer: loop {
+            // targeted search: labeled loop returns the s that conforms
+            s = 'outer: loop {
                 let s_lo = ceil_div(&(&b2 + &r * n), &b);
                 let s_hi = (&b31 + &r * n) / &a;
                 let mut cand = s_lo;
                 while cand <= s_hi {
                     let c_try = ct * modexp(&cand, e, n) % n;
                     if oracle(&c_try) {
-                        found = Some(cand);
-                        break 'outer;
+                        break 'outer cand;
                     }
                     cand += one.clone();
                 }
                 r += one.clone();
-            }
-            s = found;
+            };
         } else {
             // multiple intervals: scan upward from s + 1
             loop {
@@ -1635,4 +1633,78 @@ pub fn bleichenbacher_attack(
 
 fn two() -> BigUint {
     BigUint::from(2u32)
+}
+
+// ---- Set 7 (old-site numbering): hashes & MACs ----
+
+/// CBC-MAC over 16-byte blocks with a fixed IV (the ch49 protocol
+/// primitive — secure ONLY for fixed-length messages).
+pub fn cbc_mac(key: &[u8; 16], iv: &[u8; 16], msg: &[u8]) -> [u8; 16] {
+    assert!(msg.len() % 16 == 0 && !msg.is_empty(), "CBC-MAC needs non-empty 16-aligned input");
+    let mut prev = *iv;
+    let mut tag = [0u8; 16];
+    for block in msg.chunks_exact(16) {
+        let mut x = [0u8; 16];
+        for j in 0..16 {
+            x[j] = block[j] ^ prev[j];
+        }
+        tag = crypto_primitives::aes::aes128_ecb_encrypt_block(&x, key);
+        prev = tag;
+    }
+    tag
+}
+
+/// ch49: the variable-length CBC-MAC forgery. With a FIXED IV, the tag
+/// of a one-block message IS the chain state after that block. Query
+/// tag(P1) = T1 (the prefix), know the victim's one-block message P2
+/// with tag T2; then MAC(P1 || (P2 ^ T1)) = AES(T1 ^ (P2 ^ T1)) =
+/// AES(P2) = T2 — the forged message carries the victim's tag.
+pub fn cbc_mac_forgery(
+    key: &[u8; 16],
+    iv: &[u8; 16],
+    prefix_p1: &[u8; 16],
+    victim_p2: &[u8; 16],
+) -> ([u8; 16], Vec<u8>) {
+    let t1 = cbc_mac(key, iv, prefix_p1); // attacker's oracle query
+    let mut second_block = [0u8; 16];
+    for j in 0..16 {
+        second_block[j] = victim_p2[j] ^ t1[j];
+    }
+    let mut forged = Vec::with_capacity(32);
+    forged.extend(prefix_p1);
+    forged.extend(second_block);
+    let t2 = cbc_mac(key, iv, victim_p2);
+    let forged_tag = cbc_mac(key, iv, &forged);
+    assert_eq!(forged_tag, t2, "forged message must carry the victim's tag");
+    (t2, forged)
+}
+
+/// A toy Merkle-Damgård hash: 32-bit state, one compression function
+/// over 32-bit blocks. Small on purpose — collisions are findable in
+/// ~2^16, which is the lesson.
+pub fn toy_md_hash(state0: u32, blocks: &[u32]) -> u32 {
+    let mut s = state0;
+    for &b in blocks {
+        s = (s ^ b).wrapping_mul(0x9E37_79B9).rotate_left(7) ^ (b >> 1);
+    }
+    s
+}
+
+/// ch52-style: find a colliding pair (a, b) for a GIVEN incoming
+/// state — birthday search over the compression function's outputs.
+/// Reusable as a suffix under ANY prefix (the Merkle-Damgård flaw).
+pub fn toy_md_colliding_suffix(state: u32) -> (u32, u32, u32) {
+    use std::collections::HashMap;
+    let mut seen: HashMap<u32, u32> = HashMap::new();
+    let mut x = 0u32;
+    loop {
+        let out = toy_md_hash(state, &[x]);
+        if let Some(&prev) = seen.get(&out) {
+            return (prev, x, out);
+        }
+        seen.insert(out, x);
+        x = x.wrapping_add(1);
+        // birthday bound: collision expected by ~2^17 steps
+        assert!(x != 0, "toy collision search exhausted 2^32 (impossible)");
+    }
 }
