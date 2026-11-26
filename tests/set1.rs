@@ -978,3 +978,34 @@ fn ch51_iv_inheritance_universal_one_block_tag() {
     let forged = b"from=att&to=me&9"; // 16 bytes
     assert_eq!(cbc_mac_iv_inheritance(&key, forged), t1, "universal tag accepts the forged transfer");
 }
+
+#[test]
+fn ch53_joux_expandable_second_preimage() {
+    use cryptopals::{expandable16_build, expandable_message16, joux_multicollision16, second_preimage16, toy_md16};
+    const IV: u16 = 0x1234;
+
+    // (a) Joux: 4 pairs -> 2^4 = 16 combinations, one hash
+    let pairs = joux_multicollision16(IV, 4);
+    assert_eq!(pairs.len(), 4);
+    let base = vec![pairs[0].0, pairs[1].0, pairs[2].0, pairs[3].0];
+    let h_base = toy_md16(IV, &base);
+    for combo in 0..16u16 {
+        let msg: Vec<u16> = (0..4)
+            .map(|j| if combo & (1 << j) != 0 { pairs[j].1 } else { pairs[j].0 })
+            .collect();
+        assert_eq!(toy_md16(IV, &msg), h_base, "every combination must share the hash");
+    }
+
+    // (b) expandable messages: EVERY length in [4, 4+2^4-1] ends at S_k
+    let e = expandable16_build(IV, 4);
+    for l in 4..19 {
+        let msg = expandable_message16(&e, l).expect("length must be in range");
+        assert_eq!(toy_md16(IV, &msg), e.s_k, "expandable length {l} must end at S_k");
+    }
+
+    // (c) the second preimage: shorter than the victim, same hash
+    let victim: Vec<u16> = (0..10u16).map(|i| 0x9000 + i * 7).collect();
+    let second = second_preimage16(IV, &victim, 4).expect("second preimage must exist");
+    assert_eq!(toy_md16(IV, &second), toy_md16(IV, &victim), "second preimage must hash identically");
+    assert!(second.len() < victim.len(), "second preimage must be SHORTER ({} < {})", second.len(), victim.len());
+}

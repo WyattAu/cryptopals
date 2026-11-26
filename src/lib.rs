@@ -1764,3 +1764,154 @@ pub fn cbc_mac_iv_inheritance(key: &[u8; 16], msg: &[u8]) -> [u8; 16] {
     }
     tag
 }
+
+// ---- Set 7 ch53: Kelsey second-preimages (16-bit toy, structure-scaled) ----
+
+/// 16-bit MD compression function — same structure as the 32-bit toy,
+/// scaled so targeted-state searches cost 2^16.
+pub fn toy_md16_compress(s: u16, b: u16) -> u16 {
+    ((s ^ b).wrapping_mul(0x9E37).rotate_left(5)) ^ b.rotate_left(3)
+}
+
+pub fn toy_md16(state0: u16, blocks: &[u16]) -> u16 {
+    let mut s = state0;
+    for &b in blocks {
+        s = toy_md16_compress(s, b);
+    }
+    s
+}
+
+/// Exhaustive 1-block preimage of `target` from state `s` (2^16 scan).
+/// None if the target has no preimage (~37% per target — the caller
+/// tries several targets, making overall failure negligible).
+pub fn targeted_preimage16(s: u16, target: u16) -> Option<u16> {
+    for b in 0..=u16::MAX {
+        if toy_md16_compress(s, b) == target {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// ch53a: Joux multicollision — `pairs` sequential 1-block collision
+/// pairs, every one of the 2^pairs combinations hashing identically.
+pub fn joux_multicollision16(state: u16, pairs: usize) -> Vec<(u16, u16)> {
+    let mut s = state;
+    let mut out = Vec::with_capacity(pairs);
+    for _ in 0..pairs {
+        // find an actual collision pair from state s: scan blocks,
+        // map output->block, the first repeat is the pair (birthday,
+        // ~2^8 steps — an arbitrary fixed block has NO partner ~37%
+        // of the time, which the first version of this got wrong)
+        use std::collections::HashMap;
+        let mut seen: HashMap<u16, u16> = HashMap::new();
+        let (mut b1, mut b2) = (None, None);
+        for b in 0..=u16::MAX {
+            let o = toy_md16_compress(s, b);
+            if let Some(&prev) = seen.get(&o) {
+                b1 = Some(prev);
+                b2 = Some(b);
+                break;
+            }
+            seen.insert(o, b);
+        }
+        let (b1, b2) = match (b1, b2) {
+            (Some(a), Some(b)) => (a, b),
+            _ => panic!("joux: full 2^16 scan found no collision (impossible)"),
+        };
+        out.push((b1, b2));
+        s = toy_md16_compress(s, b1);
+    }
+    out
+}
+
+/// ch53b: Kelsey expandable messages. For each step j the branches are
+/// 1 block and 2^{j-1}+1 blocks, both mapping S_{j-1} -> S_j — the
+/// per-step length offsets are {1, 2, 4, ...}, so every total length
+/// in [k, k+2^k-1] is reachable and all messages end at S_k.
+pub struct Expandable16 {
+    pub s_k: u16,
+    pub k: usize,
+    /// per step j (0-indexed): (x_j, zeros_len, z_j, c_j)
+    pub steps: Vec<(u16, usize, u16, u16)>,
+}
+
+pub fn expandable16_build(state: u16, k: usize) -> Expandable16 {
+    let mut s = state;
+    let mut steps = Vec::with_capacity(k);
+    for j in 1..=k {
+        let zeros_len = 1usize << (j - 1);
+        // long branch prefix: zeros from S_{j-1}
+        let zeros: Vec<u16> = vec![0u16; zeros_len];
+        let s_after_zeros = toy_md16(s, &zeros);
+        // full coverage map of the SHORT branch's outputs
+        use std::collections::HashMap;
+        let mut map: HashMap<u16, u16> = HashMap::new();
+        for x in 0..=u16::MAX {
+            map.insert(toy_md16_compress(s, x), x);
+        }
+        // scan the long branch's final block until its output collides
+        // with a short-branch output — expected a couple of steps
+        let mut z = 0u16;
+        let (x_j, c_j) = loop {
+            let c = toy_md16_compress(s_after_zeros, z);
+            if let Some(&x) = map.get(&c) {
+                break (x, c);
+            }
+            z += 1;
+        };
+        steps.push((x_j, zeros_len, z, c_j));
+        s = c_j;
+    }
+    Expandable16 { s_k: s, k, steps }
+}
+
+/// Assemble an expandable message of the requested length (must lie in
+/// [k, k + 2^k - 1]); it ends at S_k.
+pub fn expandable_message16(e: &Expandable16, length: usize) -> Option<Vec<u16>> {
+    if length < e.k || length >= e.k + (1usize << e.k) {
+        return None;
+    }
+    let offset = length - e.k;
+    let mut blocks = Vec::new();
+    for (j, (x_j, zeros_len, z_j, _)) in e.steps.iter().enumerate() {
+        if offset & (1 << j) != 0 {
+            blocks.extend(vec![0u16; *zeros_len]);
+            blocks.push(*z_j);
+        } else {
+            blocks.push(*x_j);
+        }
+    }
+    debug_assert_eq!(blocks.len(), length);
+    Some(blocks)
+}
+
+/// ch53c: the second-preimage attack. Given the victim's blocks,
+/// find a DIFFERENT message hashing identically but shorter: an
+/// expandable prefix ending at S_k, a 1-block bridge onto one of the
+/// victim's intermediate states, then the victim's remaining blocks.
+pub fn second_preimage16(state0: u16, victim: &[u16], k: usize) -> Option<Vec<u16>> {
+    let l = victim.len();
+    assert!(l > k + 2, "victim must be long enough for the bridge math");
+    let e = expandable16_build(state0, k);
+    // victim's intermediate states after i blocks
+    for i in (k + 2)..=l {
+        let target = toy_md16(state0, &victim[..i]);
+        // bridge from S_k onto that state
+        if let Some(bridge) = targeted_preimage16(e.s_k, target) {
+            // need an expandable message of length ℓ <= i-2 so the
+            // second preimage is STRICTLY shorter than the victim
+            let want = (i - 2).max(k); // any valid expandable length
+            let Some(prefix) = expandable_message16(&e, want) else {
+                continue;
+            };
+            let mut second = prefix.clone();
+            second.push(bridge);
+            second.extend(&victim[i..]);
+            if toy_md16(state0, &second) == toy_md16(state0, victim) && second.len() < l {
+                return Some(second);
+            }
+        }
+    }
+    None
+}
