@@ -1303,3 +1303,76 @@ pub fn bleichenbacher_e3_forge(ff_bytes: usize, digest: &[u8], total_len: usize)
     let d = BigUint::from_bytes_be(&block);
     icbrt(&d) + BigUint::one()
 }
+
+// ---- Set 6 ch43-44: DSA + nonce-reuse private-key recovery ----
+
+pub struct DsaKey {
+    pub p: BigUint, // prime
+    pub q: BigUint, // prime, q | p-1
+    pub g: BigUint, // generator of the order-q subgroup
+    pub x: BigUint, // private key
+    pub y: BigUint, // public key g^x mod p
+}
+
+impl DsaKey {
+    pub fn from_params(p: &BigUint, q: &BigUint, g: &BigUint, x: BigUint) -> Self {
+        let y = modexp(g, &x, p);
+        DsaKey { p: p.clone(), q: q.clone(), g: g.clone(), x, y }
+    }
+
+    /// Sign a SHA-1 digest with nonce k. r,s are mod q.
+    pub fn sign(&self, digest: &[u8], k: &BigUint) -> (BigUint, BigUint) {
+        let h = BigUint::from_bytes_be(digest) % &self.q;
+        let r = modexp(&self.g, k, &self.p) % &self.q;
+        assert!(!r.is_zero(), "r must be nonzero — pick another k");
+        let k_inv = modinv(k, &self.q).expect("k invertible mod q");
+        let s = &k_inv * (&h + &self.x * &r) % &self.q;
+        (r, s)
+    }
+
+    /// Verify: v == r for a valid (r,s) over the digest.
+    pub fn verify(&self, digest: &[u8], r: &BigUint, s: &BigUint) -> bool {
+        if r.is_zero() || s.is_zero() {
+            return false;
+        }
+        let h = BigUint::from_bytes_be(digest) % &self.q;
+        let w = match modinv(s, &self.q) {
+            Some(w) => w,
+            None => return false,
+        };
+        let u1 = &h * &w % &self.q;
+        let u2 = r * &w % &self.q;
+        let v = (modexp(&self.g, &u1, &self.p) * modexp(&self.y, &u2, &self.p) % &self.p) % &self.q;
+        &v == r
+    }
+}
+
+/// ch44: two signatures over different messages with the SAME nonce k
+/// give r1 == r2, and k = (H1 - H2) / (s1 - s2) mod q. Then the
+/// private key falls out: x = (s·k - H) / r mod q.
+pub fn dsa_recover_private_key_from_repeated_nonce(
+    p: &BigUint,
+    q: &BigUint,
+    g: &BigUint,
+    y: &BigUint,
+    h1: &BigUint,
+    s1: &BigUint,
+    h2: &BigUint,
+    s2: &BigUint,
+    r: &BigUint,
+) -> Option<BigUint> {
+    let ds = srp_sub_mod(s1, s2, q); // (s1 - s2) mod q, unsigned-safe
+    let dk = srp_sub_mod(h1, h2, q);
+    let k = modinv(&ds, q)? * &dk % q;
+    // x = (s1*k - H1) / r mod q — again unsigned-safe subtraction
+    let sk = (s1 * &k) % q;
+    let num = srp_sub_mod(&sk, h1, q);
+    let r_inv = modinv(r, q)?;
+    let x = r_inv * &num % q;
+    // confirm: g^x == y
+    if modexp(g, &x, p) == *y {
+        Some(x)
+    } else {
+        None
+    }
+}

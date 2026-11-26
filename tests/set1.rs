@@ -796,3 +796,42 @@ fn ch42_bleichenbacher_e3_signature_forgery() {
     );
     assert!(naive_verify(&sigma), "the naive verifier must accept the forgery");
 }
+
+#[test]
+fn ch43_dsa_sign_and_verify() {
+    use cryptopals::DsaKey;
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let q = (&p - BigUint::from(1u32)) / BigUint::from(2u32);
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let key = DsaKey::from_params(&p, &q, &g, BigUint::from(909090u64));
+    let digest = cryptopals::sha1::sha1(b"the dsa message");
+    let (r, s) = key.sign(&digest, &BigUint::from(424242u64));
+    assert!(key.verify(&digest, &r, &s), "valid signature must verify");
+    let other = cryptopals::sha1::sha1(b"a different message");
+    assert!(!key.verify(&other, &r, &s), "wrong digest must fail");
+}
+
+#[test]
+fn ch44_repeated_nonce_recovers_private_key() {
+    use cryptopals::{DsaKey, dsa_recover_private_key_from_repeated_nonce};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let q = (&p - BigUint::from(1u32)) / BigUint::from(2u32);
+    let g = BigUint::parse_bytes(b"259157649756750491095285601530400882350", 10).unwrap();
+    let x_true = BigUint::from(314159u64);
+    let key = DsaKey::from_params(&p, &q, &g, x_true.clone());
+    // SAME k for two different messages — the fatal RNG failure
+    let k = BigUint::from(777777u64);
+    let d1 = cryptopals::sha1::sha1(b"message one");
+    let d2 = cryptopals::sha1::sha1(b"message two");
+    let (r1, s1) = key.sign(&d1, &k);
+    let (r2, s2) = key.sign(&d2, &k);
+    assert_eq!(r1, r2, "repeated k must produce identical r");
+    let h1 = BigUint::from_bytes_be(&d1) % &q;
+    let h2 = BigUint::from_bytes_be(&d2) % &q;
+    let recovered = dsa_recover_private_key_from_repeated_nonce(
+        &p, &q, &g, &key.y, &h1, &s1, &h2, &s2, &r1,
+    ).expect("repeated nonce must yield the private key");
+    assert_eq!(recovered, x_true, "recovered x must equal the true private key");
+}
