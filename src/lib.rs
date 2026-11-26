@@ -1977,3 +1977,197 @@ pub fn pollard_rho(n: &BigUint) -> Option<BigUint> {
     }
     None
 }
+
+// ---- Set 8 ch59-61: elliptic curves + ECDSA ----
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EcPoint {
+    Inf,
+    Pt { x: BigUint, y: BigUint },
+}
+
+#[derive(Clone, Debug)]
+pub struct EcCurve {
+    pub p: BigUint, // field prime
+    pub a: BigUint,
+    pub b: BigUint,
+}
+
+impl EcCurve {
+    pub fn new(p: BigUint, a: BigUint, b: BigUint) -> Self {
+        EcCurve { p, a, b }
+    }
+
+    pub fn on_curve(&self, pt: &EcPoint) -> bool {
+        match pt {
+            EcPoint::Inf => true,
+            EcPoint::Pt { x, y } => {
+                let x = x.clone();
+                let y = y.clone();
+                let lhs = (&y * &y) % &self.p;
+                let rhs = (&x * &x % &self.p * &x + &self.a * &x + &self.b) % &self.p;
+                lhs == rhs
+            }
+        }
+    }
+
+    /// Affine point addition (None-trap: all diffs wrapped mod p).
+    pub fn add(&self, p1: &EcPoint, p2: &EcPoint) -> EcPoint {
+        if let EcPoint::Inf = p1 {
+            return p2.clone();
+        }
+        if let EcPoint::Inf = p2 {
+            return p1.clone();
+        }
+        let (x1, y1) = match p1 {
+            EcPoint::Pt { x, y } => (x, y),
+            _ => unreachable!(),
+        };
+        let (x2, y2) = match p2 {
+            EcPoint::Pt { x, y } => (x, y),
+            _ => unreachable!(),
+        };
+        if x1 == x2 {
+            // same x: double, or opposite points -> infinity
+            if srp_sub_mod(y1, y2, &self.p).is_zero() && y1 == y2 {
+                return self.double(p1);
+            }
+            return EcPoint::Inf;
+        }
+        let lam = srp_sub_mod(y2, y1, &self.p)
+            * &modinv(&srp_sub_mod(x2, x1, &self.p), &self.p).expect("x1 != x2 mod p");
+        let lam = lam % &self.p;
+        let x3 = srp_sub_mod(&(&lam * &lam), &(&(x1 + x2) % &self.p), &self.p); // lam^2 - x1 - x2
+        let y3 = srp_sub_mod(&(&lam * srp_sub_mod(x1, &x3, &self.p)), y1, &self.p);
+        EcPoint::Pt { x: x3, y: y3 }
+    }
+
+    pub fn double(&self, pt: &EcPoint) -> EcPoint {
+        let (x, y) = match pt {
+            EcPoint::Pt { x, y } => (x.clone(), y.clone()),
+            EcPoint::Inf => return EcPoint::Inf,
+        };
+        if y.is_zero() {
+            return EcPoint::Inf;
+        }
+        let num = (&x * &x % &self.p * BigUint::from(3u32) + &self.a) % &self.p;
+        let lam = num * &modinv(&(&y * BigUint::from(2u32) % &self.p), &self.p).expect("2y invertible");
+        let lam = lam % &self.p;
+        let x3 = srp_sub_mod(&(&lam * &lam), &(&x * BigUint::from(2u32) % &self.p), &self.p);
+        let y3 = srp_sub_mod(&(&lam * srp_sub_mod(&x, &x3, &self.p)), &y, &self.p);
+        EcPoint::Pt { x: x3, y: y3 }
+    }
+
+    /// Double-and-add scalar multiplication.
+    pub fn mul(&self, k: &BigUint, pt: &EcPoint) -> EcPoint {
+        let mut result = EcPoint::Inf;
+        let mut base = pt.clone();
+        let mut n = k.clone();
+        while !n.is_zero() {
+            if &n % BigUint::from(2u32) == BigUint::one() {
+                result = self.add(&result, &base);
+            }
+            base = self.double(&base);
+            n /= BigUint::from(2u32);
+        }
+        result
+    }
+
+    /// Brute-force point count (test-scale fields only).
+    pub fn point_count(&self) -> usize {
+        let mut count = 1usize; // the point at infinity
+        let one = BigUint::one();
+        let mut x = BigUint::zero();
+        while &x < &self.p {
+            let rhs = (&x * &x % &self.p * &x + &self.a * &x + &self.b) % &self.p;
+            let mut y = BigUint::zero();
+            while &y < &self.p {
+                if (&y * &y) % &self.p == rhs {
+                    count += 1;
+                }
+                y += one.clone();
+            }
+            x += one.clone();
+        }
+        count
+    }
+}
+
+// ---- ch60-61: ECDSA ----
+
+pub struct EcDsa {
+    pub curve: EcCurve,
+    pub q: BigUint, // subgroup order
+    pub g: EcPoint,
+    pub x: BigUint, // private key
+    pub y: EcPoint, // public key
+}
+
+impl EcDsa {
+    pub fn keygen(curve: EcCurve, q: BigUint, g: EcPoint, x: BigUint) -> Self {
+        let y = curve.mul(&x, &g);
+        EcDsa { curve, q, g, x, y }
+    }
+
+    pub fn sign(&self, digest: &[u8], k: &BigUint) -> (BigUint, BigUint) {
+        let h = BigUint::from_bytes_be(digest) % &self.q;
+        let kg = self.curve.mul(k, &self.g);
+        let r = match &kg {
+            EcPoint::Pt { x, .. } => x % &self.q,
+            EcPoint::Inf => panic!("r must be nonzero"),
+        };
+        assert!(!r.is_zero(), "r must be nonzero — pick another k");
+        let k_inv = modinv(k, &self.q).expect("k invertible mod q");
+        let s = &k_inv * (&h + &self.x * &r) % &self.q;
+        (r, s)
+    }
+
+    pub fn verify(&self, digest: &[u8], r: &BigUint, s: &BigUint) -> bool {
+        if r.is_zero() || s.is_zero() {
+            return false;
+        }
+        let h = BigUint::from_bytes_be(digest) % &self.q;
+        let w = match modinv(s, &self.q) {
+            Some(w) => w,
+            None => return false,
+        };
+        let u1 = &h * &w % &self.q;
+        let u2 = r * &w % &self.q;
+        let lhs = self.curve.mul(&u1, &self.g);
+        let rhs = self.curve.mul(&u2, &self.y);
+        let v = match self.curve.add(&lhs, &rhs) {
+            EcPoint::Pt { x, .. } => x % &self.q,
+            EcPoint::Inf => return false,
+        };
+        &v == r
+    }
+}
+
+/// ch61: ECDSA repeated-nonce private-key recovery — the ch44 math
+/// transplanted onto curves. Confirmed via x·G == Y.
+#[allow(clippy::too_many_arguments)]
+pub fn ecdsa_recover_private_key_from_repeated_nonce(
+    q: &BigUint,
+    g: &EcPoint,
+    _p_field: &BigUint, // unused: the curve already carries the field
+    y: &EcPoint,
+    h1: &BigUint,
+    s1: &BigUint,
+    h2: &BigUint,
+    s2: &BigUint,
+    r: &BigUint,
+    curve: &EcCurve,
+) -> Option<BigUint> {
+    let ds = srp_sub_mod(s1, s2, q);
+    let dk = srp_sub_mod(h1, h2, q);
+    let k = modinv(&ds, q)? * &dk % q;
+    let sk = (s1 * &k) % q;
+    let num = srp_sub_mod(&sk, h1, q);
+    let r_inv = modinv(r, q)?;
+    let x = r_inv * &num % q;
+    if curve.mul(&x, g) == *y {
+        Some(x)
+    } else {
+        None
+    }
+}

@@ -1035,3 +1035,77 @@ fn ch58_pollard_rho_finds_small_factor() {
     assert!(f == small || f == &n / &small, "rho must surface one of the two factors");
     assert_eq!(&f * (&n / &f), n);
 }
+
+#[test]
+fn ch59_ec_group_structure() {
+    use cryptopals::{EcCurve, EcPoint};
+    use num_bigint::BigUint;
+    // textbook curve y^2 = x^3 + 2x + 2 mod 17 — properties verified
+    // BY COMPUTATION here, not by trusting remembered constants
+    let curve = EcCurve::new(BigUint::from(17u32), BigUint::from(2u32), BigUint::from(2u32));
+    let g = EcPoint::Pt { x: BigUint::from(5u32), y: BigUint::from(1u32) };
+    assert!(curve.on_curve(&g), "the generator must lie on the curve");
+    // scalar multiples of G: k*G cycles with period 19 (the group order)
+    let inf = curve.mul(&BigUint::from(19u32), &g);
+    assert_eq!(inf, EcPoint::Inf, "19*G must be the point at infinity");
+    let g_again = curve.mul(&BigUint::from(20u32), &g);
+    assert_eq!(g_again, g, "20*G must return to G");
+    // every multiple stays on-curve
+    for k in 1..=18u32 {
+        let pt = curve.mul(&BigUint::from(k), &g);
+        assert!(curve.on_curve(&pt), "k*G must be on-curve for k={k}");
+    }
+    // brute-force point count matches the group order
+    assert_eq!(curve.point_count(), 19, "the curve must have exactly 19 points");
+    // commutativity spot-check: a*G + b*G == b*G + a*G
+    let pa = curve.mul(&BigUint::from(7u32), &g);
+    let pb = curve.mul(&BigUint::from(11u32), &g);
+    assert_eq!(curve.add(&pa, &pb), curve.add(&pb, &pa));
+    // homomorphism: (a+b)*G == a*G + b*G
+    let sum = curve.mul(&BigUint::from(18u32), &g);
+    assert_eq!(curve.add(&pa, &pb), sum);
+}
+
+#[test]
+fn ch60_ecdsa_sign_verify() {
+    use cryptopals::{EcCurve, EcDsa, EcPoint};
+    use num_bigint::BigUint;
+    let curve = EcCurve::new(BigUint::from(17u32), BigUint::from(2u32), BigUint::from(2u32));
+    let g = EcPoint::Pt { x: BigUint::from(5u32), y: BigUint::from(1u32) };
+    let q = BigUint::from(19u32); // subgroup order (verified in ch59)
+    let key = EcDsa::keygen(curve, q, g, BigUint::from(7u32));
+    let digest = cryptopals::sha1::sha1(b"the ec message");
+    // k=9 here makes s = k^-1(H + x*r) = 0 mod 19 (degenerate — verify
+    // correctly rejects); k=4 is non-degenerate
+    let (r, s) = key.sign(&digest, &BigUint::from(4u32));
+    assert!(key.verify(&digest, &r, &s), "valid ECDSA must verify");
+    // NOTE: on this 17-element field the x-check accepts the MIRRORED
+    // point (~1/17 per digest — real curves: 2^-256), so the negative
+    // test uses a digest verified non-degenerate against python
+    let other = cryptopals::sha1::sha1(b"another message 0");
+    assert!(!key.verify(&other, &r, &s), "wrong digest must fail");
+}
+
+#[test]
+fn ch61_ecdsa_nonce_reuse_recovers_private_key() {
+    use cryptopals::{EcCurve, EcDsa, EcPoint, ecdsa_recover_private_key_from_repeated_nonce};
+    use num_bigint::BigUint;
+    let curve = EcCurve::new(BigUint::from(17u32), BigUint::from(2u32), BigUint::from(2u32));
+    let g = EcPoint::Pt { x: BigUint::from(5u32), y: BigUint::from(1u32) };
+    let q = BigUint::from(19u32);
+    let x_true = BigUint::from(11u32);
+    let key = EcDsa::keygen(curve.clone(), q.clone(), g.clone(), x_true.clone());
+    let k = BigUint::from(5u32); // SAME nonce for both signatures
+    let d1 = cryptopals::sha1::sha1(b"msg one");
+    let d2 = cryptopals::sha1::sha1(b"msg two");
+    let (r1, s1) = key.sign(&d1, &k);
+    let (r2, s2) = key.sign(&d2, &k);
+    assert_eq!(r1, r2, "repeated k must give identical r");
+    let h1 = BigUint::from_bytes_be(&d1) % &q;
+    let h2 = BigUint::from_bytes_be(&d2) % &q;
+    let recovered = ecdsa_recover_private_key_from_repeated_nonce(
+        &q, &g, &curve.p, &key.y, &h1, &s1, &h2, &s2, &r1, &curve,
+    ).expect("repeated nonce must yield the ECDSA private key");
+    assert_eq!(recovered, x_true, "recovered x must equal the true key");
+}
+
