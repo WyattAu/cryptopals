@@ -1376,3 +1376,95 @@ pub fn dsa_recover_private_key_from_repeated_nonce(
         None
     }
 }
+
+// ---- Set 6 ch45: DSA parameter injection ----
+
+/// The tampered-param forgery: a verifier that accepts attacker-negotiated
+/// g=1 has y=1, r=1, and v = (1^u1 · 1^u2) mod p mod q = 1 — so (1, any
+/// nonzero s) verifies for EVERY message without any private key.
+pub fn dsa_forge_tampered_g1(s: u64) -> (BigUint, BigUint) {
+    (BigUint::from(1u32), BigUint::from(s))
+}
+
+// ---- Set 6 ch46: RSA+CBC hybrid — fixed-IV CCA ----
+
+/// The "server": decrypts blob = [RSA block || CBC blocks]; the RSA
+/// plaintext doubles as the CBC IV. Returns the unpadded plaintext on
+/// success (a helpful error channel for the attacker).
+pub fn hybrid_decrypt(key: &RsaKey, aes_key: &[u8; 16], blob: &[u8]) -> Result<Vec<u8>, ()> {
+    let rsa_len = ((key.n.bits() + 7) / 8) as usize;
+    if blob.len() < rsa_len + 16 || (blob.len() - rsa_len) % 16 != 0 {
+        return Err(());
+    }
+    let iv = key.decrypt(&BigUint::from_bytes_be(&blob[..rsa_len]));
+    let iv_bytes = iv.to_bytes_be();
+    let mut ivb = [0u8; 16];
+    if iv_bytes.len() <= 16 {
+        ivb[16 - iv_bytes.len()..].copy_from_slice(&iv_bytes);
+    } else {
+        return Err(());
+    }
+    let mut pt = Vec::new();
+    let mut prev = ivb;
+    for chunk in blob[rsa_len..].chunks_exact(16) {
+        let mut b = [0u8; 16];
+        b.copy_from_slice(chunk);
+        let dec = crypto_primitives::aes::aes128_ecb_decrypt_block(&b, aes_key);
+        for k in 0..16 {
+            pt.push(dec[k] ^ prev[k]);
+        }
+        prev = b;
+    }
+    pkcs7_unpad(&pt, 16).map(|p| p.to_vec()).ok_or(())
+}
+
+/// The CCA, properly: the attacker controls every CBC ciphertext byte
+/// in the blob, so the final block becomes a CBC PADDING ORACLE target.
+/// Probe = [0(RSA width) || prev || c2]: the final block decrypts to
+/// AES_d(c2) ^ prev, and the attacker adapts prev byte-at-a-time (as in
+/// ch17) until the padding validates — recovering AES_d(c2) — then
+/// m1 = AES_d(c2) ^ P2 (the known plaintext block).
+pub fn hybrid_cca_recover_session(
+    c2: &[u8; 16],
+    rsa_len: usize,
+    p2_known: &[u8; 16],
+    oracle: &dyn Fn(&[u8]) -> Result<Vec<u8>, ()>,
+) -> Option<[u8; 16]> {
+    let mut d = [0u8; 16]; // AES_d(c2), recovered tail-first
+    for pos in (0..16).rev() {
+        let pad_len = 16 - pos;
+        let mut prev = [0u8; 16];
+        for j in (pos + 1)..16 {
+            prev[j] = d[j] ^ (pad_len as u8);
+        }
+        let mut found = None;
+        for g in 0..=255u8 {
+            prev[pos] = g;
+            let mut probe = vec![0u8; rsa_len];
+            probe.extend(prev);
+            probe.extend(c2);
+            if oracle(&probe).is_ok() {
+                if pos == 15 {
+                    // coincidence guard: a true 0x01 hit survives the
+                    // perturbation, an accidental 0x02 0x02 does not
+                    prev[14] ^= 0xff;
+                    let mut re = vec![0u8; rsa_len];
+                    re.extend(prev);
+                    re.extend(c2);
+                    if oracle(&re).is_err() {
+                        continue;
+                    }
+                }
+                found = Some(g);
+                break;
+            }
+        }
+        let g = found?;
+        d[pos] = g ^ (pad_len as u8);
+    }
+    let mut m1 = [0u8; 16];
+    for i in 0..16 {
+        m1[i] = d[i] ^ p2_known[i];
+    }
+    Some(m1)
+}

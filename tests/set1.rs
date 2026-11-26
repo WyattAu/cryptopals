@@ -835,3 +835,53 @@ fn ch44_repeated_nonce_recovers_private_key() {
     ).expect("repeated nonce must yield the private key");
     assert_eq!(recovered, x_true, "recovered x must equal the true private key");
 }
+
+#[test]
+fn ch45_dsa_g1_injection_universal_forgery() {
+    use cryptopals::{DsaKey, dsa_forge_tampered_g1};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"272334053341778607140778039263933143247", 10).unwrap();
+    let q = (&p - BigUint::from(1u32)) / BigUint::from(2u32);
+    // the tampered negotiation: g = 1
+    let key = DsaKey::from_params(&p, &q, &BigUint::from(1u32), BigUint::from(31337u64));
+    assert_eq!(key.y, BigUint::from(1u32), "y must collapse to 1");
+    let (r, s) = dsa_forge_tampered_g1(0xdead_beefu64);
+    for msg in ["any message", "a totally different one", "transfer all the money"] {
+        let digest = cryptopals::sha1::sha1(msg.as_bytes());
+        assert!(key.verify(&digest, &r, &s), "forged sig must verify for: {msg}");
+    }
+}
+
+#[test]
+fn ch46_hybrid_cca_recovers_session_key() {
+    use cryptopals::{RsaKey, hybrid_decrypt, hybrid_cca_recover_session};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"201308184236009972859622644976808679617", 10).unwrap();
+    let q = BigUint::parse_bytes(b"246562181880310784098606962552255416867", 10).unwrap();
+    let key = RsaKey::from_primes(&p, &q, &BigUint::from(65537u64));
+    let aes_key = *b"ch46 aes key!!!!";
+    // honest blob: RSA-encrypted session key || CBC(knowable plaintext ^ IV)
+    let session_key: [u8; 16] = *b"the session key!";
+    let m1 = BigUint::from_bytes_be(&session_key);
+    let c1 = key.encrypt(&m1);
+    let c1b = c1.to_bytes_be(); // RSA block = full modulus width (32)
+    // attacker knows this (15 bytes + PKCS#7 pad 0x01 — the last byte
+    // must be a valid pad or the server rejects the honest blob too)
+    let p2_known: [u8; 16] = *b"attack at dawn!\x01";
+    // c2 = AES_enc(P2 XOR IV) — the IV IS the RSA plaintext (16 bytes)
+    let mut xored = [0u8; 16];
+    for j in 0..16 {
+        xored[j] = p2_known[j] ^ session_key[j];
+    }
+    let c2_arr = crypto_primitives::aes::aes128_ecb_encrypt_block(&xored, &aes_key);
+    let mut blob = c1b.clone();
+    blob.extend(c2_arr);
+    // sanity: the honest server decrypts the honest blob
+    assert!(hybrid_decrypt(&key, &aes_key, &blob).is_ok());
+    // the CCA: no private key, only the public oracle + known P2
+    let oracle = |b: &[u8]| hybrid_decrypt(&key, &aes_key, b);
+    let rsa_len = ((key.n.bits() + 7) / 8) as usize;
+    let recovered = hybrid_cca_recover_session(&c2_arr, rsa_len, &p2_known, &oracle)
+        .expect("CCA must succeed");
+    assert_eq!(recovered, session_key, "session key recovered without the RSA key");
+}
