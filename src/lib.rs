@@ -1192,3 +1192,90 @@ pub fn srp_offline_dictionary(
     }
     None
 }
+
+// ---- Set 6 ch41: RSA parity oracle ----
+
+/// PKCS#1 v1.5 type-2 pad: 0x00 0x02 || nonzero padding || 0x00 || msg.
+/// The filler bytes here are a deterministic LCG — challenge scaffolding,
+/// not a randomness recommendation.
+pub fn rsa_pad(msg: &[u8], total: usize) -> Vec<u8> {
+    assert!(total >= msg.len() + 11, "PKCS#1 needs >= 8 padding bytes");
+    let mut out = vec![0x00u8, 0x02];
+    let mut seed = 0xc0ffee_u64;
+    while out.len() < total - msg.len() - 1 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let b = ((seed >> 33) & 0xff) as u8;
+        if b != 0 {
+            out.push(b);
+        }
+    }
+    out.push(0x00);
+    out.extend(msg);
+    out
+}
+
+/// The inverse of rsa_pad; None on malformation.
+pub fn rsa_unpad(m: &[u8]) -> Option<Vec<u8>> {
+    if m.len() < 11 || m[0] != 0x00 || m[1] != 0x02 {
+        return None;
+    }
+    let sep = m[2..].iter().position(|&b| b == 0x00)? + 2;
+    if sep < 10 {
+        return None; // padding must be >= 8 bytes
+    }
+    if m[2..sep].iter().any(|&b| b == 0) {
+        return None;
+    }
+    Some(m[sep + 1..].to_vec())
+}
+
+/// The oracle: decrypts and reveals ONLY the parity of the plaintext
+/// (true = odd). This single bit per query is enough to binary-search
+/// the whole message.
+pub fn parity_oracle_server(ct: &BigUint, key: &RsaKey) -> bool {
+    let m = key.decrypt(ct);
+    let _ = rsa_unpad(&m.to_bytes_be()); // server's normal processing
+    let lsb = &m % BigUint::from(2u32);
+    lsb == BigUint::one()
+}
+
+/// The attack: multiply the ciphertext by (2^e)^i mod n each round —
+/// the plaintext doubles. Each parity bit refines the integer bounds
+/// jlo/jhi on j_i = floor(2^i·m / n) — tracked EXACTLY as integers
+/// (midpoint rounding on the m-scale drifts from the true dyadic
+/// split, which misclassified m by a few units in tests). At the end
+/// m is the unique integer in [jlo·n/2^K, jhi·n/2^K), verified by
+/// re-encryption.
+pub fn parity_oracle_attack(
+    ct: &BigUint,
+    e: &BigUint,
+    n: &BigUint,
+    oracle: &dyn Fn(&BigUint) -> bool,
+) -> BigUint {
+    let two = BigUint::from(2u32);
+    let one = BigUint::one();
+    let mult = modexp(&two, e, n); // E(2), computable from the public key
+    let k = n.bits() + 8; // extra refinement so the window holds one integer
+    let (mut jlo, mut jhi) = (BigUint::zero(), one.clone());
+    let mut ct_i = ct.clone();
+    for _ in 0..k {
+        ct_i = &ct_i * &mult % n;
+        if oracle(&ct_i) {
+            // j_i odd: j = 2j_prev + 1
+            jlo = &jlo * &two + &one;
+            jhi *= &two;
+        } else {
+            // j_i even: j = 2j_prev
+            jhi = &jhi * &two - &one;
+            jlo *= &two;
+        }
+    }
+    let scale = two.pow(k as u32);
+    let lo_bound = &jlo * n;
+    let hi_bound = &jhi * n;
+    // unique integer in [lo_bound/scale, hi_bound/scale)
+    let m = (&lo_bound + &scale - &one) / &scale;
+    assert!(modexp(&m, e, n) == *ct, "parity oracle: recovered candidate must re-encrypt to ct");
+    assert!(&m * &scale >= lo_bound && &m * &scale < hi_bound, "recovered m must sit in the j-window");
+    m
+}

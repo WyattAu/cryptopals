@@ -714,3 +714,28 @@ fn ch38_srp_offline_dictionary_recovers_password() {
     );
     assert_eq!(found.as_deref(), Some(true_password), "offline dictionary must recover the password");
 }
+
+#[test]
+fn ch41_rsa_parity_oracle_binary_search() {
+    use cryptopals::{RsaKey, parity_oracle_attack, parity_oracle_server, rsa_pad, rsa_unpad};
+    use num_bigint::BigUint;
+    let p = BigUint::parse_bytes(b"201308184236009972859622644976808679617", 10).unwrap();
+    let q = BigUint::parse_bytes(b"246562181880310784098606962552255416867", 10).unwrap();
+    let key = RsaKey::from_primes(&p, &q, &BigUint::from(65537u64));
+    // pad -> encrypt; the attack recovers the PADDED integer
+    let padded = rsa_pad(b"parity oracle wins", 32);
+    let m = BigUint::from_bytes_be(&padded);
+    let ct = key.encrypt(&m);
+    // sanity: the oracle simply reports the true parity
+    assert_eq!(parity_oracle_server(&ct, &key), &m % BigUint::from(2u32) == BigUint::from(1u32));
+    // binary search with n.bits() parity queries
+    let recovered = parity_oracle_attack(&ct, &key.e, &key.n, &|c| parity_oracle_server(c, &key));
+    assert_eq!(recovered, m, "parity oracle must recover the padded plaintext");
+    // and unpad must strip back to the message (left-pad: to_bytes_be
+    // drops the leading 0x00 header byte)
+    let mut padded_bytes = recovered.to_bytes_be();
+    while padded_bytes.len() < 32 {
+        padded_bytes.insert(0, 0);
+    }
+    assert_eq!(rsa_unpad(&padded_bytes).as_deref(), Some(b"parity oracle wins".as_slice()));
+}
